@@ -264,6 +264,30 @@ jobs:
               *" $t "*) ;;
               *) echo "::error::requested target '$t' is not in packages.x86_64-windows ($have)"; exit 1 ;;
             esac
+            # THE NAME EXISTING IS NOT THE TARGET RESOLVING, and the gap between
+            # the two is a whole class of confusing red. `builtins.attrNames`
+            # above forces only the attrset's SPINE; a target's own derivation
+            # can still fail to evaluate underneath it. Measured on
+            # logos-basecamp at master: `packages.x86_64-windows` lists fifteen
+            # targets and `.default.drvPath` fails with
+            #     error: attribute 'x86_64-windows' missing
+            # -- raised by a DEPENDENCY flake whose pin predates its own Windows
+            # port. Without this step that surfaces later and elsewhere, naming
+            # an attribute the caller never wrote, and reads like a bug in this
+            # workflow rather than a stale input in the repo.
+            if ! drv=$(nix eval --raw ".#packages.x86_64-windows.$t.drvPath" \
+                         "${NIXARGS[@]}" 2>tgt.log); then
+              echo "::error::target '$t' is listed but does not EVALUATE."
+              echo "::error::The attribute name exists; resolving its derivation fails. That is"
+              echo "::error::almost always a dependency flake pinned to a commit from before its"
+              echo "::error::own Windows port -- an --override-input reaches only the TOP-level"
+              echo "::error::input, so each dependency still resolves its own lock."
+              echo "::error::If the message below names an attribute you did not write, that is"
+              echo "::error::the input to bump."
+              sed -n '1,25p' tgt.log
+              exit 1
+            fi
+            echo "  $t -> ${drv##*/}"
             ATTRS+=(".#packages.x86_64-windows.$t")
           done
           printf '%s\n' "${ATTRS[@]}" > attrs.txt
