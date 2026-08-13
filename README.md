@@ -1,13 +1,20 @@
-# logos-ci-actions
+# logos-windows-ci
 
-Reusable GitHub Actions workflows and composite actions for the Logos fleet.
+**Windows CI for the Logos fleet**: cross-build a repo's `x86_64-windows`
+target on an ordinary Linux runner, then *run* the result on a real
+`windows-latest` runner. That hand-off is the whole design — Nix does not run on
+Windows, so the build and the execution cannot be the same job.
 
-Today that is one workflow — **Windows CI**, which cross-builds a repo's
-`x86_64-windows` target on an ordinary Linux runner and then *runs* the result
-on a real `windows-latest` runner. The repo is not named for it on purpose:
-`nix-setup` and the lint harness are platform-neutral, and GitHub versions a
-repo as a whole, so a `-windows-` name would force a second shared-CI repo the
-first time anyone wants a Linux or macOS job.
+One repo, one concern, one tag train — the same shape as `setup-nix-cache-action`
+and `logos-modules-release-action`. A GitHub tag is repo-wide, so anything
+sharing this repo shares `v1`, and a Linux or macOS harness has no reason to be
+versioned in lockstep with a Windows one. When a second platform wants this
+treatment it gets its own repo, not a wider tag here.
+
+`nix-setup` is the one thing here that is not Windows-specific, and it stays for
+now because it is two steps deep (disk reclaim and a read-only-cache warning
+around `logos-co/setup-nix-cache-action`) — too little to justify a repo of its
+own until a second consumer actually appears. It extracts cleanly when one does.
 
 ## Using it
 
@@ -17,7 +24,7 @@ One file in your repo, from
 ```yaml
 jobs:
   windows:
-    uses: logos-co/logos-ci-actions/.github/workflows/windows-ci.yml@v1
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
     secrets: inherit
     with:
       targets: lgx

@@ -3,7 +3,7 @@
 # install pinning, the binary cache, the disk reclaim, the target-existence
 # guard, the cold-cache refusal, the PE-format gate, the import-closure gate,
 # the artifact hand-off and its round-trip check, the wine pre-filter and the
-# real-Windows execution -- lives once in logos-co/logos-ci-actions.
+# real-Windows execution -- lives once in logos-co/logos-windows-ci.
 #
 # DO NOT add this file to a repo with no `packages.x86_64-windows`. The job will
 # fail loudly by design rather than pass by having nothing to do. Check with:
@@ -22,7 +22,7 @@ on:
 
 jobs:
   windows:
-    uses: logos-co/logos-ci-actions/.github/workflows/windows-ci.yml@v1
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
     secrets: inherit
     with:
       # Attribute names under packages.x86_64-windows. Whitespace-separated.

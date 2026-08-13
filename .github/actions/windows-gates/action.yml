@@ -222,7 +222,7 @@ runs:
     #
     # Two different readers, one of which nobody controls and which can differ
     # between two runners in the same workflow. So: resolve it from the flake
-    # that ships THIS action -- $GITHUB_ACTION_PATH/../../.. is the logos-ci-actions
+    # that ships THIS action -- $GITHUB_ACTION_PATH/../../.. is the logos-windows-ci
     # checkout GitHub made for the action, flake.lock included -- and prove the
     # result can actually read PEs before trusting a word it says.
     #
@@ -238,7 +238,7 @@ runs:
         set -euo pipefail
         ROOT=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
         if [ ! -f "$ROOT/flake.nix" ] || [ ! -f "$ROOT/flake.lock" ]; then
-          echo "::error::expected the logos-ci-actions flake at $ROOT (from \$GITHUB_ACTION_PATH)."
+          echo "::error::expected the logos-windows-ci flake at $ROOT (from \$GITHUB_ACTION_PATH)."
           echo "::error::Without it the objdump would have to come from an unpinned source,"
           echo "::error::and a gate whose reader is unpinned is not a gate. Refusing to guess."
           find "$ROOT" -maxdepth 1 | sed -n '1,20p'

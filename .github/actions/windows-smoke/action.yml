@@ -197,7 +197,7 @@ runs:
           # the thing that decides whether every PE in this repo "starts", so an
           # unpinned wine is an unpinned verdict.
           #
-          # $GITHUB_ACTION_PATH/../../.. is the logos-ci-actions checkout GitHub made
+          # $GITHUB_ACTION_PATH/../../.. is the logos-windows-ci checkout GitHub made
           # for this action, flake.lock included -- the same resolution the
           # gates action uses. Verified from this repo's own pin:
           # legacyPackages.x86_64-linux.wine64Packages.minimal -> wine64-10.0.
@@ -207,7 +207,7 @@ runs:
           # ------------------------------------------------------------------
           ROOT=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
           if [ ! -f "$ROOT/flake.nix" ] || [ ! -f "$ROOT/flake.lock" ]; then
-            echo "::error::expected the logos-ci-actions flake at $ROOT (from \$GITHUB_ACTION_PATH)."
+            echo "::error::expected the logos-windows-ci flake at $ROOT (from \$GITHUB_ACTION_PATH)."
             echo "::error::Without it wine would have to come from the runner's floating"
             echo "::error::registry, and an unpinned launcher is an unpinned verdict."
             find "$ROOT" -maxdepth 1 | sed -n '1,20p'

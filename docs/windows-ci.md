@@ -67,7 +67,7 @@ else — no Nix pinning, no cache config, no gate scripts.
 ```yaml
 jobs:
   windows:
-    uses: logos-co/logos-ci-actions/.github/workflows/windows-ci.yml@v1
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
     secrets: inherit
     with:
       targets: lgx
@@ -441,6 +441,12 @@ The rule: **`v1` is one train.** The workflow and all three actions
 (`nix-setup`, `windows-gates`, `windows-smoke`) are tagged from the same commit
 and move together. Every `uses:` **inside `windows-ci.yml`** says `@v1` — the
 same string the callers use.
+
+That train is also why this repo is Windows-only rather than a general
+shared-CI repo. A tag is repo-wide, so anything living here shares `v1`: a
+Linux or macOS harness would be forced to re-version every time a PE gate
+changed, and vice versa. One repo, one concern, one train — the shape
+`setup-nix-cache-action` and `logos-modules-release-action` already use.
 
 That rule is about the *reusable workflow* only, and the distinction is easy to
 "fix" in the wrong direction. `lint-ci.yml` runs in **this** repo's own checkout,
