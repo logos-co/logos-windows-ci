@@ -5,10 +5,17 @@ description: >
   action rather than twice in windows-ci.yml for two reasons. The legs are only
   comparable if they run the SAME harness, and a harness duplicated in two YAML
   blocks stays identical only by discipline. And a script embedded in YAML is
-  invisible to shellcheck: actionlint substitutes a placeholder for `${{ }}`
-  before linting, which is precisely how `[ -z "${{ inputs.smoke }}" ]` shipped
-  in an earlier revision of this design and lint-cleanly turned a good build red
-  on the first caller whose smoke script contained a double quote.
+  invisible to shellcheck, because actionlint replaces every GitHub expression
+  interpolation with a placeholder before linting -- which is precisely how an
+  emptiness test written against a raw interpolated input shipped in an earlier
+  revision of this design and lint-cleanly turned a good build red on the first
+  caller whose smoke script contained a double quote.
+
+  (This paragraph deliberately does not SPELL an interpolation. The runner
+  parses an action's description as a template, so a literal one here is
+  evaluated -- and an empty one is a syntax error that makes the whole action
+  fail to load with "An expression was expected", before any step runs. That is
+  not hypothetical: it is what this file did on its first ever CI run.)
 
 inputs:
   smoke:

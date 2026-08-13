@@ -4,8 +4,14 @@
 # It lives in its own file, with an extension the linter does not collect, for
 # two reasons: the linter must not lint its own fixture, and holding these
 # literals inside lint-actions.sh made that script trip its own rules the moment
-# the script itself came into scope. Three run: blocks, one broken rule each.
+# the script itself came into scope. Three run: blocks, one broken rule each,
+# plus rule (4) in a DESCRIPTION rather than a run: block -- which is where the
+# real instance was, and why rule (4) is a whole-file scan instead of a yq walk
+# over the keys the other rules look at.
 name: deliberately bad
+description: >
+  rule (4): an empty GitHub expression, ${{ }}, in a YAML value. On a real
+  action this fails the whole file to load before any step runs.
 runs:
   using: composite
   steps:

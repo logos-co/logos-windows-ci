@@ -43,6 +43,23 @@
 #      a false red in a plain command and a SILENT PASS in an `if` condition.
 #      Both shipped here, on adjacent lines of the .lgx gate; see the header of
 #      .github/actions/windows-gates/action.yml for the measurements.
+#   4. NO EMPTY GitHub expression -- `${{` followed only by spaces and `}}` --
+#      anywhere in a YAML VALUE. The runner parses these files as templates, so
+#      an empty interpolation is a SYNTAX ERROR: "An expression was expected".
+#      It does not fail the step, it fails the whole FILE to load, before any
+#      step runs.
+#
+#      This rule is here because it happened, twice, on the same day. A prose
+#      sentence that spelled the interpolation syntax -- inside an `inputs.*`
+#      description, and inside an action's top-level `description` -- was
+#      evaluated as one. The second cost a red CI run on the first caller ever
+#      to use this harness, with the message pointing at line 2 column 14 of an
+#      action nobody had touched.
+#
+#      Nothing else catches it. actionlint would, but its scope is
+#      `.github/workflows`, so an `action.yml` is never handed to it -- the
+#      exact gap this script exists to close. Writing the syntax in a `#`
+#      COMMENT is safe and remains allowed: comments are not parsed.
 #
 # Usage: .github/lint-actions.sh [--self-test]
 set -euo pipefail
@@ -148,6 +165,32 @@ lint_file() {
     sed 's/^/::error::    /' "$TMP/yqerr"
     return 0
   fi
+
+  # (4) empty GitHub expression in a YAML value. Scanned over the file's
+  # NON-COMMENT text: `sed 's/#.*//'` blanks comments so the syntax stays
+  # writable there, which is where these files legitimately discuss it.
+  # Deliberately a whole-file text scan rather than a yq walk -- an empty
+  # interpolation breaks the file wherever it appears, not only in the keys
+  # this script otherwise knows about, and the two real instances were in an
+  # input description and an action description, neither of which is a `run:`.
+  # Collected into a file first, rather than a process substitution on `done`,
+  # so the directive below has a complete command to sit in front of -- a
+  # ShellCheck directive before `done` is itself an error (SC1123), which this
+  # script found by linting itself.
+  #
+  # shellcheck disable=SC2016  # the single quotes are the POINT: this is a grep
+  # pattern matching a LITERAL interpolation, not something to expand.
+  # `grep -n` reads to EOF, so rule (3) does not apply to this pipeline.
+  sed 's/#.*//' "$f" | grep -n '\${{[[:space:]]*}}' > "$TMP/emptyexpr" || true
+  while IFS=: read -r n _; do
+    [ -n "$n" ] || continue
+    fail "$rel" "$n" \
+      "EMPTY GitHub expression in a YAML value. The runner parses this file as a
+::error::  template, so this is a syntax error -- 'An expression was expected' -- and it
+::error::  fails the whole FILE to load, before any step runs. Put the syntax in a '#'
+::error::  comment instead (comments are not parsed), or describe it in words."
+  done < "$TMP/emptyexpr"
+
   for key in run smoke; do
     # `..|select(has(KEY))` finds blocks under any layout without this script
     # having to know which kind of file it is looking at. The string guard
@@ -223,6 +266,7 @@ if [ "${1:-}" = --self-test ]; then
   saw "(1) shellcheck"       "shellcheck findings"
   saw "(2) interpolation"    "GitHub interpolation inside"
   saw "(3) SIGPIPE"          "piped into a consumer that exits early"
+  saw "(4) empty expression" "EMPTY GitHub expression in a YAML value"
   [ "$rc" -ne 0 ] || { echo "::error::self-test: overall status was 0"; st=1; }
 
   echo "--- self-test B: a standalone shell file (rules 1 and 3) ---"
