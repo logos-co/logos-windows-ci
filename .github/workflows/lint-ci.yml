@@ -1,0 +1,55 @@
+name: Lint CI definitions
+
+# Keeps `.github/lint-actions.sh` wired up, because the gap it closes is one
+# nobody notices: "actionlint is clean" was TRUE of this repo while the three
+# composite actions -- where most of the shell lives -- had never been linted
+# by anything at all. actionlint's default scope is `.github/workflows`, and
+# pointed at an `action.yml` it refuses the file outright (`"jobs" section is
+# missing in workflow`, exit 1, measured with actionlint 1.7.12).
+#
+# The linter's own self-test runs FIRST and on every run. A linter that has
+# silently stopped matching anything reports exactly what a clean tree reports,
+# which is the failure mode this whole design exists to refuse.
+
+on:
+  push:
+    branches: [ master ]
+    paths: [ '.github/**' ]
+  pull_request:
+    paths: [ '.github/**' ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix-setup
+        with:
+          github-token: ${{ github.token }}
+
+      # Tools come from THIS repo's flake.lock, not `nixpkgs#...`. A linter
+      # resolved from the runner's floating registry can change verdict between
+      # two runs with no commit anywhere, which is the same defect the gates
+      # action's pinned objdump exists to avoid.
+      - name: Prove the linter still fires
+        run: |
+          set -euo pipefail
+          W=path:.#legacyPackages.x86_64-linux
+          nix shell "$W.shellcheck" "$W.yq-go" -c .github/lint-actions.sh --self-test
+
+      - name: Lint every run block, composite actions included
+        run: |
+          set -euo pipefail
+          W=path:.#legacyPackages.x86_64-linux
+          nix shell "$W.shellcheck" "$W.yq-go" -c .github/lint-actions.sh
+
+      # actionlint still runs, over the scope it actually covers. It is kept
+      # for the workflow-schema checks it is good at -- NOT as evidence about
+      # interpolation-into-shell, which it substitutes away before shellcheck
+      # ever sees it. `lint-actions.sh` rule (2) is what covers that class.
+      - name: actionlint (workflow schema; NOT interpolation coverage)
+        run: |
+          set -euo pipefail
+          nix shell "path:.#legacyPackages.x86_64-linux.actionlint" -c actionlint

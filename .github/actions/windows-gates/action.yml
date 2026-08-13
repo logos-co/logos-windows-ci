@@ -1,0 +1,375 @@
+name: Windows artifact gates
+description: >
+  Assert real properties of a staged Windows (mingw) output tree. Every gate
+  here fails on an EMPTY input set -- that is not defensive padding. Each of the
+  Windows bugs found while porting this project was a SILENT SUCCESS: an install
+  rule that copied nothing and exited 0, a package that labelled itself
+  linux-amd64, a plugin shipped without its DLLs, a load-time fallback that
+  failed soft. A gate that passes vacuously on zero artifacts reproduces exactly
+  the failure mode it exists to catch.
+
+inputs:
+  stage-dir:
+    description: Directory holding one subdirectory per built target.
+    required: false
+    default: stage
+  min-pes:
+    description: >
+      Minimum number of loose .exe/.dll files the tree must contain. Default 1.
+      Set to 0 only together with min-archives >= 1 (a headers+static-lib repo
+      such as logos-lidl legitimately produces no PE at all) or with
+      lgx-variant: true (a repo whose only Windows artifact is a .lgx, whose
+      PEs are inside the archive and are gated there instead).
+    required: false
+    default: '1'
+  min-archives:
+    description: Minimum number of .a static archives that must be mingw COFF.
+    required: false
+    default: '0'
+  lgx-variant:
+    description: >
+      Assert every .lgx carries a real variants/windows-x86_64 payload. This is
+      a floor in its own right: it refuses a tree with no .lgx, and refuses a
+      .lgx whose Windows variant holds no PE, so it is a legitimate partner for
+      min-pes: 0 / min-archives: 0.
+    required: false
+    default: 'false'
+  assemble:
+    description: >
+      JSON object mapping a staged subtree to extra directories its imports may
+      resolve from, for apps assembled out of more than one derivation. Windows
+      resolves a plugin's imports from the APPLICATION directory as well as the
+      plugin's own, so "beside it" legitimately spans targets for those trees.
+      Example: {"basecamp": ["liblogos/bin", "liblogos/lib"]}
+    required: false
+    default: '{}'
+
+# ---------------------------------------------------------------------------
+# NO `producer | grep -q`, NO `producer | head`, ANYWHERE IN THIS FILE.
+#
+# Under `set -euo pipefail` a producer that is still writing when its consumer
+# exits early is killed by SIGPIPE (141), and `pipefail` promotes that to the
+# pipeline's status. Both possible consequences shipped here, on ADJACENT lines
+# of the .lgx gate. Measured on ubuntu:24.04 / GNU tar 1.35 / bash 5.2 -- the
+# builder's own platform -- against .lgx fixtures built from real cross-built
+# PEs:
+#
+#   tar tzf "$lgxf" | grep -q '^variants/windows-x86_64/'
+#     grep exits at the first match; tar is still listing.  PIPESTATUS 141 0.
+#     FALSE RED on a .lgx that is perfectly correct -- at 25 entries and at
+#     every size above it. The lgx-variant configuration could not pass AT ALL.
+#
+#   if tar tzf "$lgxf" | grep -qE '^variants/(linux|darwin)'
+#     Same 141, but here it is the `if` condition, so the pipeline reading
+#     "killed" is read as "no match". A .lgx carrying variants/linux-amd64
+#     PASSED SILENTLY through the check whose own comment calls it a contract.
+#     Measured: linux entry at position 2 of 207 -> PIPESTATUS 141 0 -> PASSED.
+#     With the same archive written linux-LAST -> 0 0 -> correctly REFUSED.
+#     So the gate's verdict depended on tar member ORDER, and `lgx add` writes
+#     variants in the order they were added -- linux first, in practice.
+#
+# It is NOT enough to know the output is small. macOS bsdtar block-buffers its
+# listing and passes both lines; GNU tar flushes per entry and fails both. The
+# gate's correctness must not rest on a libc buffer size.
+#
+# THE FIX EVERYWHERE IS: CAPTURE, THEN TEST.
+# It costs one variable, it runs `tar` ONCE instead of four times per archive,
+# and it is strictly stronger -- `names=$(tar tzf ...)` fails under `set -e`
+# when tar itself fails, whereas the `if tar ... | grep` form reads an
+# unreadable archive as "no non-Windows variant" and passes it. (Measured: a
+# missing archive gives rc=2 with the capture form, and a silent pass with the
+# shipped form.)
+#
+# Diagnostics use `sed -n '1,Np'` rather than `head -N` for the same reason:
+# `head` exits early and takes the `find` with it, so `set -e` aborts the step
+# at 141 BEFORE the `exit 1` that was supposed to report the real problem.
+# Measured: `cat big | head -3` -> 141, `cat big | sed -n 1,3p` -> 0.
+#
+# `.github/lint-actions.sh` enforces this; see docs/windows-ci.md.
+# ---------------------------------------------------------------------------
+runs:
+  using: composite
+  steps:
+    - name: Gate — artifacts are 64-bit PEs, and nothing native leaked in
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage-dir }}
+        MIN_PES: ${{ inputs.min-pes }}
+        MIN_ARCHIVES: ${{ inputs.min-archives }}
+        LGX_VARIANT: ${{ inputs.lgx-variant }}
+      run: |
+        set -euo pipefail
+        [ -d "$STAGE" ] || { echo "::error::stage dir '$STAGE' does not exist"; exit 1; }
+        # At least ONE floor must be armed, or this gate passes on an empty
+        # tree. lgx-variant counts as one: it refuses a tree with no .lgx and a
+        # .lgx with no PE payload, which is the whole floor an lgx-only repo
+        # can have. Before it counted, such a repo could not be configured at
+        # all -- every min-pes/min-archives pair was refused, which made the
+        # lgx gate unreachable in its own natural configuration.
+        if [ "$MIN_PES" -eq 0 ] && [ "$MIN_ARCHIVES" -eq 0 ] && [ "$LGX_VARIANT" != 'true' ]; then
+          echo "::error::min-pes and min-archives are both 0 and lgx-variant is not set —"
+          echo "::error::no floor is armed, so this gate would pass on an empty tree."
+          echo "::error::A repo whose only Windows artifact is a .lgx sets lgx-variant: true."
+          exit 1
+        fi
+
+        mapfile -t pes < <(find "$STAGE" -type f \( -name '*.exe' -o -name '*.dll' \) | sort)
+        echo "PE candidates: ${#pes[@]} (floor $MIN_PES)"
+        if [ "${#pes[@]}" -lt "$MIN_PES" ]; then
+          echo "::error::only ${#pes[@]} PE files staged, expected >= $MIN_PES — a target installed nothing"
+          find "$STAGE" -type f | sed -n '1,50p'
+          exit 1
+        fi
+
+        bad=0
+        for f in "${pes[@]}"; do
+          case "$(file -b "$f")" in
+            PE32+*x86-64*) ;;
+            *) echo "::error::not a 64-bit PE: $f — $(file -b "$f")"; bad=1 ;;
+          esac
+        done
+
+        # A silent fallback to a NATIVE build emits unsuffixed ELF binaries,
+        # which the *.exe/*.dll filter above would never even look at.
+        #
+        # `case` on a captured string, not `file … | grep -q`: a `grep -q` that
+        # matches kills `file` and pipefail turns the 141 into "no match", i.e.
+        # an ELF that silently passes. `file` is short enough today that it
+        # wins the race, but that is a buffer size, not a guarantee.
+        while read -r f; do
+          case "$(file -b "$f")" in
+            *ELF*) echo "::error::native ELF binary in a Windows output: $f"; bad=1 ;;
+          esac
+        done < <(find "$STAGE" -type f ! -name '*.exe' ! -name '*.dll')
+
+        # The static-library tier. A mingw .a is an ar archive of COFF objects;
+        # a native one holds ELF objects. Without this check a repo whose whole
+        # Windows output is headers + .a (logos-lidl) has nothing asserted at all.
+        if [ "$MIN_ARCHIVES" -gt 0 ]; then
+          mapfile -t archives < <(find "$STAGE" -type f -name '*.a' | sort)
+          echo "static archives: ${#archives[@]} (floor $MIN_ARCHIVES)"
+          if [ "${#archives[@]}" -lt "$MIN_ARCHIVES" ]; then
+            echo "::error::only ${#archives[@]} archives staged, expected >= $MIN_ARCHIVES"
+            bad=1
+          fi
+          for a in "${archives[@]}"; do
+            kind=$(file -b "$a")
+            case "$kind" in
+              *[Aa]rchive*) ;;
+              *) echo "::error::not an ar archive: $a — $kind"; bad=1; continue ;;
+            esac
+            # `file` on the archive itself is not enough: it reports "current ar
+            # archive" for both. Look at a member.
+            #
+            # `.obj`, not just `.o`: CMake sets CMAKE_CXX_OUTPUT_EXTENSION to
+            # .obj when CMAKE_SYSTEM_NAME is Windows, so a mingw-cross archive's
+            # members are `foo.cpp.obj`. Measured on logos-lidl: an earlier
+            # version of this gate matched only '\.o$', found nothing, and
+            # declared "contains no object members" on two perfectly good
+            # archives. It failed RED, which is the right direction -- but the
+            # same mistake pointed the other way is how a gate passes on nothing.
+            #
+            # Captured, not `ar t | grep -m1`. `grep -m1` exits at the first
+            # match while `ar` is still listing, so the pipeline is 141 and the
+            # `|| true` that used to be here swallowed it -- which also
+            # swallowed a genuine `ar` failure on an unreadable archive, and an
+            # unreadable archive would then be reported as "contains no .o/.obj
+            # members" rather than as the read error it is.
+            if ! members=$(ar t "$a" 2>&1); then
+              echo "::error::cannot list $a: $(printf '%s\n' "$members" | sed -n '1,5p')"; bad=1; continue
+            fi
+            # `grep` returning 1 on NO MATCH is a NORMAL outcome here -- it is
+            # exactly the case the `[ -z "$m" ]` branch below exists to report.
+            # Removing the old `|| true` was right for the SIGPIPE class, but it
+            # also let that 1 reach `set -e` through the assignment, so the gate
+            # aborted having named no archive and no reason. Capture the status
+            # instead and split the two: 1 = no match (reported below), >1 =
+            # grep itself failed, which is a read error and gets its own line.
+            mrc=0
+            m=$(printf '%s\n' "$members" | grep -E '\.(o|obj)$' | sed -n '1p') || mrc=$?
+            if [ "$mrc" -gt 1 ]; then
+              echo "::error::listing the members of $a failed: grep exited $mrc"; bad=1; continue
+            fi
+            if [ -z "$m" ]; then
+              echo "::error::$a contains no .o/.obj members: $(printf '%s\n' "$members" | sed -n '1,5p')"; bad=1; continue
+            fi
+            rm -rf .arprobe && mkdir .arprobe
+            ( cd .arprobe && ar x "$OLDPWD/$a" "$m" )
+            k=$(file -b ".arprobe/$m")
+            case "$k" in
+              *"COFF"*|*"PE32+"*|*"Intel amd64"*) ;;
+              *) echo "::error::$a member $m is not COFF/x86-64: $k"; bad=1 ;;
+            esac
+          done
+          rm -rf .arprobe
+        fi
+        [ "$bad" -eq 0 ]
+
+    # ------------------------------------------------------------------------
+    # THE READER OF THE LOAD-BEARING GATE, AND WHERE IT COMES FROM
+    #
+    # The import-closure gate is the one that decides whether a shipped tree is
+    # complete, and it can only be as trustworthy as its objdump. An earlier
+    # revision took it from `nixpkgs#...`, i.e. the RUNNER'S FLAKE REGISTRY --
+    # a floating channel tarball, not this repo's pin -- while its comment
+    # claimed the opposite ("already in the closure we just built"). Measured
+    # 2026-08-12 from one machine, one minute apart:
+    #
+    #   nixpkgs#pkgsCross.mingwW64.buildPackages.binutils
+    #       -> /nix/store/2ygvxdjd...-x86_64-w64-mingw32-binutils-wrapper-2.46
+    #   this repo's own pin (below)
+    #       -> /nix/store/a54mx5f1...-x86_64-w64-mingw32-binutils-wrapper-2.46
+    #
+    # Two different readers, one of which nobody controls and which can differ
+    # between two runners in the same workflow. So: resolve it from the flake
+    # that ships THIS action -- $GITHUB_ACTION_PATH/../../.. is the logos-ci-actions
+    # checkout GitHub made for the action, flake.lock included -- and prove the
+    # result can actually read PEs before trusting a word it says.
+    #
+    # Cost is a substitution, not a build: that store path is in
+    # cache.nixos.org (verified with `nix store ls --store https://cache.nixos.org`).
+    #
+    # Exported to $GITHUB_ENV so the caller's `extra-gates` step uses the SAME
+    # verified objdump instead of resolving its own.
+    # ------------------------------------------------------------------------
+    - name: Resolve the mingw objdump from this repo's own pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
+        if [ ! -f "$ROOT/flake.nix" ] || [ ! -f "$ROOT/flake.lock" ]; then
+          echo "::error::expected the logos-ci-actions flake at $ROOT (from \$GITHUB_ACTION_PATH)."
+          echo "::error::Without it the objdump would have to come from an unpinned source,"
+          echo "::error::and a gate whose reader is unpinned is not a gate. Refusing to guess."
+          find "$ROOT" -maxdepth 1 | sed -n '1,20p'
+          exit 1
+        fi
+        ATTR="path:$ROOT#legacyPackages.x86_64-linux.pkgsWindows.buildPackages.binutils"
+        OBJDUMP=""
+        while read -r p; do
+          if [ -x "$p/bin/x86_64-w64-mingw32-objdump" ]; then
+            OBJDUMP="$p/bin/x86_64-w64-mingw32-objdump"; break
+          fi
+        # --no-write-lock-file: the action checkout is not a git tree and may be
+        # read-only, so an incomplete lock must fail here rather than have nix
+        # try to write one. Verified against a read-only, non-git copy of this
+        # flake: same store path as from the repo itself.
+        done < <(nix build --no-link --no-write-lock-file --print-out-paths "$ATTR")
+        [ -n "$OBJDUMP" ] || { echo "::error::no x86_64-w64-mingw32-objdump in $ATTR"; exit 1; }
+
+        # Positive control. An objdump that cannot parse PE prints no import
+        # table, and "no imports" is what a COMPLETE bundle also looks like --
+        # a wrong reader would turn this gate into a green rubber stamp.
+        #
+        # CAPTURED, not `"$OBJDUMP" --info | grep -qw`. That pipeline is the
+        # SIGPIPE shape from the header, and this is the worst place in the file
+        # for it: `if ! <pipeline>` inverts, so a 141 REFUSES a perfectly good
+        # objdump and takes the whole gates action down with a message accusing
+        # the reader of not supporting PE. Measured on ubuntu:24.04 (Ubuntu's
+        # own binutils, NOT the pinned 2.46 store path -- the emulated-amd64
+        # route to that binary was not usable here, so this is a proxy for its
+        # SIZE and a direct measurement of the pipeline's behaviour at that
+        # size):
+        #   binutils-mingw-w64 x86_64-w64-mingw32-objdump --info
+        #       -> 2042 B / 81 lines  -> PIPESTATUS 0 0    (passes today)
+        #   /usr/bin/objdump --info (multi-target)
+        #       -> 31153 B / 742 lines -> PIPESTATUS 141 0 (would REFUSE)
+        # A mingw-only binutils lists only its own targets and so squeaks under
+        # the stdio buffer. This control's correctness therefore rests on
+        # binutils' target table staying under ~4 KB, which nobody chose and
+        # nobody is watching. It should not rest on anything of the sort.
+        info=$("$OBJDUMP" --info) || {
+          echo "::error::$OBJDUMP --info failed; it cannot be trusted to read PEs."; exit 1; }
+        if ! grep -qw 'pei-x86-64' <<<"$info"; then
+          echo "::error::$OBJDUMP does not support the pei-x86-64 target."
+          echo "::error::It would report zero imports for every PE, which is indistinguishable"
+          echo "::error::from a complete bundle. Refusing to run the import gate with it."
+          printf '%s\n' "$info" | sed -n '1,20p'
+          exit 1
+        fi
+        echo "objdump: $OBJDUMP ($("$OBJDUMP" --version | sed -n '1p')), pei-x86-64 supported"
+        echo "OBJDUMP=$OBJDUMP" >> "$GITHUB_ENV"
+
+    - name: Gate — every PE's imports are bundled beside it
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage-dir }}
+        MIN_PES: ${{ inputs.min-pes }}
+        ASSEMBLE: ${{ inputs.assemble }}
+      run: |
+        set -euo pipefail
+        if [ "$MIN_PES" -eq 0 ]; then
+          echo "no loose PEs expected in this tree — the import gate runs over the"
+          echo ".lgx payload instead (see the .lgx step), or not at all for a"
+          echo "headers+static-lib repo."
+          exit 0
+        fi
+        python3 "$GITHUB_ACTION_PATH/import_closure.py"
+
+    - name: Gate — the .lgx declares a Windows variant with a real payload
+      if: inputs.lgx-variant == 'true'
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage-dir }}
+        MIN_PES: ${{ inputs.min-pes }}
+      run: |
+        set -euo pipefail
+        mapfile -t lgxs < <(find "$STAGE" -name '*.lgx' -type f | sort)
+        [ "${#lgxs[@]}" -gt 0 ] || { echo "::error::lgx-variant requested but no .lgx staged"; exit 1; }
+        for lgxf in "${lgxs[@]}"; do
+          # ONE listing, captured. See the SIGPIPE note at the top of this file:
+          # both of the lines this replaces were `tar tzf | grep -q`, and they
+          # were the two worked examples of the class -- the first a guaranteed
+          # FALSE RED on any correct .lgx, the second a SILENT PASS for a .lgx
+          # carrying variants/linux-amd64. Capturing also means a tar that
+          # CANNOT read the archive fails here, loudly, instead of being read as
+          # "no non-Windows variant found" and waved through.
+          if ! names=$(tar tzf "$lgxf" 2>&1); then
+            echo "::error::cannot list $lgxf — it is not a readable gzip tar:"
+            printf '%s\n' "$names" | sed -n '1,20p'
+            exit 1
+          fi
+
+          # The mislabel this catches: under a mingw cross, isDarwin and
+          # isAarch64 are both false, so the variant used to fall through to
+          # "linux-amd64" -- a Windows package claiming to be a Linux one. lgpm
+          # computes "windows-x86_64" and has no alias fallback, so the exact
+          # spelling is a contract.
+          grep -q '^variants/windows-x86_64/' <<<"$names" \
+            || { echo "::error::$lgxf has no variants/windows-x86_64/"; printf '%s\n' "$names"; exit 1; }
+          if grep -qE '^variants/(linux|darwin)' <<<"$names"; then
+            echo "::error::$lgxf carries a non-Windows variant"; printf '%s\n' "$names"; exit 1
+          fi
+          # Entry names alone are not enough: a zero-byte payload satisfies the
+          # greps above. Extract and check the payload is a real PE.
+          rm -rf .lgxout && mkdir .lgxout && tar xzf "$lgxf" -C .lgxout
+          n=0
+          while read -r p; do
+            [ -s "$p" ] || { echo "::error::empty payload: $p"; exit 1; }
+            # `case` on a captured string, not `file … | grep -q` — same reason
+            # as the ELF check above and the two lines this step used to open
+            # with. Here a 141 would report a perfectly good PE as "not a
+            # 64-bit PE", i.e. a false red on a correct package.
+            k=$(file -b "$p")
+            case "$k" in
+              *"PE32+"*x86-64*) ;;
+              *) echo "::error::payload is not a 64-bit PE: $p — $k"; exit 1 ;;
+            esac
+            n=$((n+1))
+          done < <(find .lgxout/variants/windows-x86_64 -type f \( -name '*.dll' -o -name '*.exe' \))
+          [ "$n" -gt 0 ] || { echo "::error::$lgxf windows-x86_64 variant contains no PE"; exit 1; }
+          echo "$lgxf: verified $n payload PE(s)"
+
+          # For a repo whose ONLY Windows artifact is a .lgx (min-pes: 0) the
+          # loose-tree import gate has nothing to look at, so the payload's
+          # imports would go unchecked -- a package that installs cleanly and
+          # then fails to load, which is this project's signature bug. Run the
+          # same import closure over the extracted payload. FLAT_TREE, because
+          # a payload root is not a stage root: there is no per-target
+          # subdirectory, so "beside it" means the payload's own bin/lib.
+          if [ "$MIN_PES" -eq 0 ]; then
+            STAGE=".lgxout/variants/windows-x86_64" MIN_PES=1 ASSEMBLE='{}' FLAT_TREE=1 \
+              python3 "$GITHUB_ACTION_PATH/import_closure.py"
+          fi
+          rm -rf .lgxout
+        done

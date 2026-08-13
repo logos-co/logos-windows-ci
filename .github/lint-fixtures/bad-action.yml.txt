@@ -1,0 +1,26 @@
+# Deliberately broken. Used ONLY by `lint-actions.sh --self-test`, which asserts
+# that each of the three rules fires on it by name.
+#
+# It lives in its own file, with an extension the linter does not collect, for
+# two reasons: the linter must not lint its own fixture, and holding these
+# literals inside lint-actions.sh made that script trip its own rules the moment
+# the script itself came into scope. Three run: blocks, one broken rule each.
+name: deliberately bad
+runs:
+  using: composite
+  steps:
+    # rule (3): producer piped into an early-exiting consumer.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        tar tzf "$F" | grep -q '^variants/windows-x86_64/'
+    # rule (2): GitHub interpolation substituted into the script text.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        if [ -z "${{ inputs.smoke }}" ]; then echo no; fi
+    # rule (1): a plain shellcheck finding (SC2086 etc).
+    - shell: bash
+      run: |
+        set -euo pipefail
+        if [ $UNQUOTED == x ]; then echo hi; fi

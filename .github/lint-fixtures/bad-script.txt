@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Deliberately broken standalone script. Used ONLY by
+# `lint-actions.sh --self-test`, which copies it somewhere with no extension and
+# asserts that the shell-file path fires both of the rules that apply there.
+set -euo pipefail
+names=$(tar tzf "$1")          # rule (3) on the next line
+tar tzf "$1" | grep -q '^variants/'
+if [ $names == x ]; then       # rule (1): SC2086 / SC2244-class findings
+  echo hi
+fi

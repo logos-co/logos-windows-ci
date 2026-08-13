@@ -1,0 +1,347 @@
+name: Windows smoke
+description: >
+  Run a caller's smoke script against a staged Windows tree -- byte-identically
+  on wine (ubuntu-latest) and on a real windows-latest runner. It lives in an
+  action rather than twice in windows-ci.yml for two reasons. The legs are only
+  comparable if they run the SAME harness, and a harness duplicated in two YAML
+  blocks stays identical only by discipline. And a script embedded in YAML is
+  invisible to shellcheck: actionlint substitutes a placeholder for `${{ }}`
+  before linting, which is precisely how `[ -z "${{ inputs.smoke }}" ]` shipped
+  in an earlier revision of this design and lint-cleanly turned a good build red
+  on the first caller whose smoke script contained a double quote.
+
+inputs:
+  smoke:
+    description: >
+      bash script, run from the staged tree ROOT. The root holds one directory
+      per target, so every path begins with the target name --
+      `run lgx/bin/lgx.exe --help`, not `run bin/lgx.exe --help`.
+      Empty when `smoke-file` is used instead.
+    required: false
+    default: ''
+  smoke-file:
+    description: >
+      Path, relative to `caller-dir`, of a committed script to run instead of
+      the inline `smoke` string. Same cwd, same `run` wrapper, same
+      `$STAGE_ABS` -- only the delivery differs. Exactly one of `smoke` /
+      `smoke-file` must be non-empty; the caller workflow rejects both-or-
+      neither before any build starts, and this action re-checks because an
+      action can be used directly.
+    required: false
+    default: ''
+  caller-dir:
+    description: >
+      Directory the caller's repo was checked out into, relative to the
+      workspace. Only read when `smoke-file` is set.
+    required: false
+    default: caller
+  stage-dir:
+    description: Directory the artifact was downloaded into.
+    required: false
+    default: stage
+  wine:
+    description: >
+      'true' to launch every PE through wine (the Linux pre-filter leg), 'false'
+      to exec it directly (the real-Windows leg). This is the ONLY difference
+      between the two legs.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # ----------------------------------------------------------------------
+    # The upload/download hop is the one link in this chain nobody has ever
+    # observed end to end. Assert it instead of assuming it: the builder wrote
+    # pe-manifest.txt next to the tree, so re-count here and diff.
+    # ----------------------------------------------------------------------
+    - name: Verify the artifact survived the round trip
+      shell: bash
+      working-directory: ${{ inputs.stage-dir }}
+      run: |
+        set -euo pipefail
+        if [ ! -f pe-manifest.txt ]; then
+          echo "::error::pe-manifest.txt is missing from the downloaded artifact."
+          echo "::error::The builder writes it into the tree root immediately before upload."
+          echo "::error::If it is absent, the artifact is not the one this workflow produced"
+          echo "::error::-- or upload-artifact dropped it (it excludes hidden files, which is"
+          echo "::error::why this file is NOT dot-prefixed)."
+          find . -type f | sed -n '1,50p'
+          exit 1
+        fi
+        # A FLOOR, for the same reason windows-gates refuses min-pes: 0 with
+        # min-archives: 0 and says so in its own description. Without it an
+        # empty tree carrying an empty manifest satisfies every check below --
+        # the two files are equal, both empty -- and this step printed
+        # "artifact round trip verified: 0 PEs" and exited 0, after which the
+        # smoke script ran against nothing. Two comparisons that agree on
+        # emptiness are not evidence that anything arrived.
+        n=$(wc -l < pe-manifest.txt | tr -d '[:space:]')
+        if [ "$n" -lt 1 ]; then
+          # One shape legitimately stages no LOOSE PE: a repo whose Windows
+          # artifact is a .lgx, whose PEs live inside the archive and were
+          # gated there on the builder. Anything else with an empty manifest is
+          # an empty artifact.
+          nlgx=$(find . -name '*.lgx' -type f | wc -l | tr -d '[:space:]')
+          if [ "$nlgx" -lt 1 ]; then
+            echo "::error::the manifest lists ZERO PEs and the tree holds no .lgx either."
+            echo "::error::There is nothing here to verify and nothing for the smoke script"
+            echo "::error::to execute. Check the builder's Stage step: an install rule that"
+            echo "::error::copied nothing exits 0 too."
+            find . -type f | sed -n '1,50p'
+            exit 1
+          fi
+          echo "no loose PEs; artifact carries $nlgx .lgx (payload gated on the builder)"
+        fi
+        find . -type f \( -name '*.exe' -o -name '*.dll' \) \
+          | sed 's|^\./||' | LC_ALL=C sort > arrived.txt
+        # Compared in the shell, NOT with diff. `diff` is absent from some
+        # Windows bash installs, and `if ! diff a b` cannot tell "the files
+        # differ" from "diff is not installed" -- it reports a missing tool as a
+        # corrupted artifact. Measured: this check failed exactly that way on a
+        # Windows box whose artifact was in fact byte-perfect.
+        #
+        # COMPARED WITH THE CARRIAGE RETURNS STRIPPED, because the comparison
+        # and the diagnosis disagreed about what a line is. Reproduced on real
+        # Windows 11 / MSYS bash 5.3.15 / GNU grep 3.0 with a CRLF
+        # pe-manifest.txt: `cat` is byte-exact so the `!=` FIRED, but MSYS grep
+        # strips the CR before matching, so both `grep -Fxv -f` calls found
+        # every line present and printed NOTHING -- the step failed having
+        # named no file at all, which is the least actionable possible red.
+        # A CR is not a missing PE. Normalise, compare, and say so separately.
+        tr -d '\r' < pe-manifest.txt > manifest.norm
+        tr -d '\r' < arrived.txt     > arrived.norm
+        if [ "$(cat manifest.norm)" != "$(cat arrived.norm)" ]; then
+          echo "::error::the PE set changed between upload and download."
+          echo "::error::A PE that vanishes here reappears later as a silent load failure."
+          grep -Fxv -f arrived.norm manifest.norm \
+            | sed 's/^/::error::  LOST in transit: /' > lost.txt || true
+          grep -Fxv -f manifest.norm arrived.norm \
+            | sed 's/^/::error::  APPEARED from nowhere: /' > extra.txt || true
+          cat lost.txt extra.txt
+          # NEVER fail without naming something. If the two lists disagree but
+          # neither grep can localise it, the tool is lying to us -- print both
+          # sides whole rather than exit on an empty explanation.
+          if [ ! -s lost.txt ] && [ ! -s extra.txt ]; then
+            echo "::error::(the two listings differ but no line could be localised —"
+            echo "::error:: printing both in full rather than failing silently)"
+            echo "::error::--- recorded on the builder ---"
+            sed 's/^/::error::  /' manifest.norm
+            echo "::error::--- found after download ---"
+            sed 's/^/::error::  /' arrived.norm
+          fi
+          exit 1
+        fi
+        if [ "$(cat pe-manifest.txt)" != "$(cat arrived.txt)" ]; then
+          echo "::warning::pe-manifest.txt and the local listing hold the SAME PE set but"
+          echo "::warning::differ in line endings (CR). Something opened the manifest in text"
+          echo "::warning::mode between upload and download. Not a lost binary; not failed."
+        fi
+        [ "$n" -eq 0 ] || echo "artifact round trip verified: $n PEs"
+        rm -f arrived.txt manifest.norm arrived.norm lost.txt extra.txt
+
+    - name: Smoke
+      shell: bash
+      working-directory: ${{ inputs.stage-dir }}
+      env:
+        # Via env, never interpolated into the script text. See the description.
+        SMOKE: ${{ inputs.smoke }}
+        SMOKE_FILE: ${{ inputs.smoke-file }}
+        CALLER_DIR: ${{ inputs.caller-dir }}
+        WINE: ${{ inputs.wine }}
+      run: |
+        set -euo pipefail
+        # $RUNNER_TEMP is a WINDOWS path on windows-latest (D:\a\_temp) while
+        # $PATH here is consumed by an MSYS-family bash, where `:` is the
+        # separator. `PATH="$RUNNER_TEMP/bin:$PATH"` therefore does NOT add the
+        # directory it looks like it adds. Measured on real Windows 11, MSYS
+        # bash 5.3.15, with RUNNER_TEMP='C:\Users\...\ci-probe':
+        #     PATH[0] = C                                   <- junk entry
+        #     PATH[1] = \Users\...\ci-probe/bin              <- drive DISCARDED
+        # `run` was still found -- but via that second, DRIVE-RELATIVE entry,
+        # which resolves against whatever drive is current. Setting the letter
+        # to Z: produced the identical entry, so the drive letter is thrown
+        # away rather than compared: what makes it work today is that
+        # RUNNER_TEMP's path-after-the-colon happens to exist on the drive the
+        # smoke step is standing on (D:\a\_temp and D:\a\<repo> are both on D:).
+        # Move either one to another drive and `run` silently disappears, and
+        # the smoke script fails with `run: command not found` -- which reads
+        # like the wrapper was never installed.
+        #
+        # So let bash spell the directory itself. `pwd` inside it returns the
+        # POSIX form (/d/a/_temp/bin) on the Windows leg and the plain absolute
+        # path on the Linux leg, so ONE line is correct on both.
+        # Everything downstream uses $TMPDIR_POSIX rather than $RUNNER_TEMP, so
+        # the Windows spelling never reaches a context that splits on ':'.
+        TMPDIR_POSIX=$(cd "$RUNNER_TEMP" && pwd)
+        RUN_BIN=$(mkdir -p "$TMPDIR_POSIX/bin" && cd "$TMPDIR_POSIX/bin" && pwd)
+        [ -n "$RUN_BIN" ] || { echo "::error::could not resolve \$RUNNER_TEMP/bin"; exit 1; }
+        cp "$GITHUB_ACTION_PATH/run" "$RUN_BIN/run"
+        chmod +x "$RUN_BIN/run"
+        export PATH="$RUN_BIN:$PATH"
+        # Prove it, rather than assume it. `run` not being on PATH is otherwise
+        # reported by the smoke script as `run: command not found`, which looks
+        # like a caller mistake instead of a harness one.
+        command -v run >/dev/null || {
+          echo "::error::the 'run' wrapper is not on PATH after installing it to $RUN_BIN."
+          echo "::error::PATH[0]=$(echo "$PATH" | cut -d: -f1)"
+          exit 1; }
+        echo "run wrapper: $(command -v run)"
+
+        if [ "$WINE" = 'true' ]; then
+          # ------------------------------------------------------------------
+          # The wine binary is PINNED, for exactly the reason the gates action's
+          # objdump is. `nixpkgs#wine64Packages.minimal` is the RUNNER'S FLAKE
+          # REGISTRY -- a floating channel tarball nobody in this org controls,
+          # which can differ between two runners in the same workflow. wine is
+          # the thing that decides whether every PE in this repo "starts", so an
+          # unpinned wine is an unpinned verdict.
+          #
+          # $GITHUB_ACTION_PATH/../../.. is the logos-ci-actions checkout GitHub made
+          # for this action, flake.lock included -- the same resolution the
+          # gates action uses. Verified from this repo's own pin:
+          # legacyPackages.x86_64-linux.wine64Packages.minimal -> wine64-10.0.
+          # --no-write-lock-file: that checkout is not a git tree and may be
+          # read-only, so an incomplete lock must fail here rather than have nix
+          # try to write one.
+          # ------------------------------------------------------------------
+          ROOT=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
+          if [ ! -f "$ROOT/flake.nix" ] || [ ! -f "$ROOT/flake.lock" ]; then
+            echo "::error::expected the logos-ci-actions flake at $ROOT (from \$GITHUB_ACTION_PATH)."
+            echo "::error::Without it wine would have to come from the runner's floating"
+            echo "::error::registry, and an unpinned launcher is an unpinned verdict."
+            find "$ROOT" -maxdepth 1 | sed -n '1,20p'
+            exit 1
+          fi
+          outs=$(nix build --no-link --no-write-lock-file --print-out-paths \
+                   "path:$ROOT#legacyPackages.x86_64-linux.wine64Packages.minimal")
+          WINE_OUT="${outs%%$'\n'*}"
+          # The launcher is `wine64`, NOT `wine`. An earlier revision hardcoded
+          # `$out/bin/wine`, which does not exist in this derivation, so the
+          # wine leg could not pass for any caller. Listed from the real store
+          # path this repo's own pin resolves to
+          # (9rfjybw218055dzmxvmamh63297mbvjn-wine64-10.0/bin): wine64,
+          # wine64-preloader, wineserver, winedbg, ... and no `wine`.
+          # Probed rather than re-hardcoded: nixpkgs has moved this name before
+          # (wow64 builds ship `wine` and no `wine64`), and a hardcoded name is
+          # what broke it the first time.
+          RUN_EXEC=
+          for c in wine64 wine; do
+            if [ -x "$WINE_OUT/bin/$c" ]; then RUN_EXEC="$WINE_OUT/bin/$c"; break; fi
+          done
+          if [ -z "$RUN_EXEC" ]; then
+            echo "::error::no wine launcher in $WINE_OUT/bin (looked for wine64, wine)."
+            echo "::error::Contents:"
+            find "$WINE_OUT/bin" -maxdepth 1 \( -type f -o -type l \) \
+              | sed 's|.*/|::error::  |'
+            exit 1
+          fi
+          export RUN_EXEC
+          export WINEPREFIX="$TMPDIR_POSIX/wineprefix" WINEDEBUG=-all
+          export WINEDLLOVERRIDES="mscoree,mshtml="
+          unset DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR
+          # There was a `chmod -R u+rwX .` here, with a comment claiming
+          # upload-artifact drops the executable bit and wine needs it back.
+          # Both halves are wrong, measured: the builder's Stage step uses
+          # `cp -rL --no-preserve=mode`, which drops the store's 0555 to
+          # 0644/0664 (whatever the runner's umask gives), so NO staged file
+          # has an execute bit -- and `u+X` adds `x` only to files that ALREADY
+          # have one. Measured on a real staged tree: 0 of 3 files executable
+          # before the chmod, 0 of 3 after; plain `u+x` would have changed it.
+          # The line could never restore a bit on a single PE. And wine does not want
+          # one: it loads the PE itself, `run` tests `-f` rather than `-x`, and
+          # a 0664 lgx.exe ran fine under wine. An inert line with a false
+          # comment is worse than no line: it is a load-bearing-looking step
+          # that would go on being copied.
+
+          # Positive control on the launcher, BEFORE any smoke runs, for the
+          # same reason the gates action proves its objdump can read PEs before
+          # trusting it. A launcher that cannot start makes every PE in the tree
+          # fail identically, and `run` would report each one -- exit code,
+          # empty streams, the shipped tree -- as if the artifact were at fault.
+          if ! wver=$("$RUN_EXEC" --version 2>&1); then
+            echo "::error::$RUN_EXEC cannot even report its version:"
+            printf '%s\n' "$wver" | sed -n '1,10p'
+            echo "::error::Every PE in the tree would now fail, and the failure would be"
+            echo "::error::reported against the artifact. Refusing to run the smoke script"
+            echo "::error::with a launcher that does not work."
+            exit 1
+          fi
+          echo "wine: $RUN_EXEC ($(printf '%s\n' "$wver" | sed -n '1p'))"
+          # wine maps the whole unix filesystem at Z:.
+          export STAGE_ABS="Z:$PWD"
+        else
+          export RUN_EXEC=""
+          # Assigning inside `export` masks the command's exit status (SC2155):
+          # on a bash whose `pwd` has no -W -- anything but MSYS/Git-Bash -- the
+          # substitution fails, `export` succeeds, and STAGE_ABS is silently
+          # empty for the rest of the run under `set -e`. Split so it fails.
+          if ! STAGE_ABS=$(pwd -W 2>/dev/null) || [ -z "$STAGE_ABS" ]; then
+            echo "::error::\`pwd -W\` produced nothing on the native leg."
+            echo "::error::\$STAGE_ABS must be the tree root as the PE sees it (a drive path),"
+            echo "::error::and -W is how an MSYS/Git-Bash tells you one. This step must run"
+            echo "::error::under the windows-latest runner's default \`shell: bash\`."
+            echo "::error::pwd=$(pwd)  SHELL=${SHELL:-<unset>}  OSTYPE=${OSTYPE:-<unset>}"
+            exit 1
+          fi
+          export STAGE_ABS
+        fi
+        echo "cwd=$(pwd)  STAGE_ABS=$STAGE_ABS  RUN_EXEC=${RUN_EXEC:-<direct exec>}"
+        echo "staged targets: $(find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort | tr '\n' ' ')"
+
+        # Resolve WHICH script to run, and refuse the two ambiguous states. The
+        # caller workflow already rejects both-or-neither before the build, but
+        # this action is usable on its own, and "neither" is the dangerous one:
+        # it would run an empty file, exit 0, and be reported as a smoke pass.
+        if [ -n "$SMOKE" ] && [ -n "${SMOKE_FILE:-}" ]; then
+          echo "::error::both 'smoke' and 'smoke-file' were given to this action."
+          echo "::error::They are two deliveries of the same script; one would be"
+          echo "::error::silently ignored. Pass exactly one."
+          exit 1
+        fi
+        if [ -z "$SMOKE" ] && [ -z "${SMOKE_FILE:-}" ]; then
+          echo "::error::neither 'smoke' nor 'smoke-file' was given, so there is no"
+          echo "::error::script to run. This action does not treat 'nothing to do' as"
+          echo "::error::a pass -- gate the JOB on the input instead, the way"
+          echo "::error::windows-ci.yml does, so a compile-only run is visibly a"
+          echo "::error::compile-only run rather than a green smoke leg."
+          exit 1
+        fi
+
+        if [ -n "${SMOKE_FILE:-}" ]; then
+          # cwd is the staged tree; $CALLER_DIR is relative to the WORKSPACE, so
+          # resolve from $GITHUB_WORKSPACE rather than from here. Spelled by
+          # bash via `cd && pwd` for the same reason $RUNNER_TEMP is above: on
+          # the native leg $GITHUB_WORKSPACE is a drive path, and pasting one
+          # into a POSIX context does not mean what it looks like it means.
+          if ! WS=$(cd "$GITHUB_WORKSPACE" && pwd) || [ -z "$WS" ]; then
+            echo "::error::could not resolve \$GITHUB_WORKSPACE ('${GITHUB_WORKSPACE:-<unset>}')."
+            exit 1
+          fi
+          SCRIPT="$WS/$CALLER_DIR/$SMOKE_FILE"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::smoke-file not found: $SCRIPT"
+            echo "::error::smoke-file is relative to the caller checkout ('$CALLER_DIR'),"
+            echo "::error::NOT to the staged tree. If '$CALLER_DIR' is missing entirely,"
+            echo "::error::the job did not check the caller out -- that checkout is"
+            echo "::error::conditional on smoke-file being set."
+            echo "::error::workspace contents:"
+            find "$WS" -mindepth 1 -maxdepth 2 -not -path '*/.git/*' \
+              | sed "s|^$WS/|::error::  |" | sed -n '1,40p'
+            exit 1
+          fi
+          # An empty file satisfies -f, runs, asserts nothing and exits 0 -- a
+          # green smoke leg that tested nothing. Same refusal the caller
+          # workflow makes; repeated because this action is usable on its own.
+          if [ ! -s "$SCRIPT" ]; then
+            echo "::error::smoke-file is empty: $CALLER_DIR/$SMOKE_FILE"
+            echo "::error::An empty script exits 0 having asserted nothing, and would"
+            echo "::error::be reported as a smoke pass."
+            exit 1
+          fi
+          echo "smoke-file: $CALLER_DIR/$SMOKE_FILE"
+          bash -euo pipefail "$SCRIPT"
+        else
+          printf '%s\n' "$SMOKE" > "$TMPDIR_POSIX/smoke.sh"
+          bash -euo pipefail "$TMPDIR_POSIX/smoke.sh"
+        fi

@@ -1,0 +1,506 @@
+name: Windows (cross)
+
+# Reusable Windows CI for every Logos repo that has an x86_64-windows target.
+#
+# THE SHAPE, AND WHY
+#   Nix does not run on Windows. The only Nix on a Windows box is inside WSL2,
+#   which is Linux and produces ELF -- logos-libp2p-module currently burns a
+#   windows-latest runner plus a WSL install plus a cold Nix bootstrap on every
+#   run to build and test x86_64-linux binaries, which proves nothing about
+#   Windows. A Windows BUILD is therefore a cross build on an ordinary
+#   ubuntu-latest runner; RUNNING the result is a separate job on a real
+#   windows-latest runner, fed by an artifact. That hand-off is the whole design.
+#
+#   wine runs on the Linux side as a cheap pre-filter (it substitutes in ~45 s,
+#   needs no display and no privileges). It is necessary-but-not-sufficient:
+#   wine's DLL-search and window-message semantics diverge from Windows exactly
+#   where this project's two hardest bugs lived (LOAD_WITH_ALTERED_SEARCH_PATH;
+#   QProcess::terminate on a windowless Qt child), so the native leg is the one
+#   that counts and wine only buys a faster red.
+#
+# THE COST MODEL, WHICH THE CALLER DOES NOT GET TO IGNORE
+#   The mingw *toolchain* is cached upstream (cache.nixos.org, 200). The mingw
+#   *Qt* stack is not, in either cache -- qtbase, qtdeclarative, qtsvg,
+#   qtremoteobjects, icu4c and boost were all measured 404 in both. Building
+#   that from source is hours, and GitHub's ceiling is 6 h. So this workflow
+#   REFUSES to start a cold Qt build (see the derivation-budget step) rather
+#   than time out after four hours in a way nobody can read. Prime the cache
+#   once, from logos-nix's windows-cache-prime.yml, before enabling any
+#   Qt-dependent caller.
+#
+# CALLER STRINGS ARE DATA, NEVER SHELL SOURCE
+#   Every `inputs.*` that reaches a shell does so through `env:`. GitHub
+#   substitutes `${{ }}` into the script TEXT before bash ever sees it, so a
+#   caller value containing a quote breaks the surrounding command and a caller
+#   value containing $(...) executes on this runner. actionlint does not catch
+#   it -- it replaces `${{ }}` with a placeholder before handing the script to
+#   shellcheck, which is exactly why an earlier revision of this file linted
+#   clean while `[ -z "${{ inputs.smoke }}" ]` turned a green build red on the
+#   first caller whose smoke script contained a double quote.
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: >
+          Whitespace-separated attribute names under `packages.x86_64-windows`.
+          Each becomes a subdirectory of the staged tree, so a smoke script
+          refers to `<target>/bin/foo.exe`.
+        type: string
+        required: false
+        default: default
+      smoke:
+        description: >
+          bash script run against the staged tree, on BOTH wine and a real
+          windows-latest runner, from the tree ROOT. The tree root holds one
+          directory per target, so every path starts with a target name:
+          `run lgx/bin/lgx.exe --help`, NOT `run bin/lgx.exe --help`.
+          Invoke PEs through the `run` wrapper on PATH -- it is wine on Linux
+          and a direct exec on Windows, so ONE script serves both legs. It
+          refuses a path that does not exist and a command that exits 0 having
+          printed nothing, and on any failure reports the exit code, both of
+          the program's streams, and what shipped beside the binary.
+          `$STAGE_ABS` is the tree root spelled the way the PE will see it (a
+          `Z:` path under wine, a drive path on Windows). Empty means
+          COMPILE-ONLY -- allowed, but reported as a coverage gap, not a pass.
+        type: string
+        required: false
+        default: ''
+      smoke-file:
+        description: >
+          Path, relative to the CALLER's repo root, of a committed bash script
+          to run instead of an inline `smoke:` string. Identical contract --
+          same cwd, same `run` wrapper, same `$STAGE_ABS`; only the delivery
+          differs. Mutually exclusive with `smoke`.
+
+          Prefer this once a smoke script outgrows a few lines. An inline block
+          is INVISIBLE TO SHELLCHECK -- actionlint replaces every expression
+          interpolation with a placeholder before linting, so nothing checks it
+          -- and it cannot be run by hand during development. A committed file
+          is lintable in the caller's own CI and executable locally against a
+          native build.
+
+          (That sentence deliberately does not spell the interpolation syntax
+          out. A literal empty one inside a YAML VALUE is itself parsed as an
+          expression, and an empty expression is a syntax error -- which is
+          exactly how the first draft of this description failed actionlint.
+          The `#` comments in this file may spell it: comments are not parsed.)
+
+          The smoke jobs download an artifact and do NOT otherwise check out the
+          caller, so setting this is what adds that checkout. It lands in a
+          SUBDIRECTORY (`caller/`) rather than the workspace root, so the
+          checkout can never interact with the downloaded `stage/` tree in
+          either order.
+        type: string
+        required: false
+        default: ''
+      native-smoke:
+        description: Run `smoke` on a real windows-latest runner. Free on public repos.
+        type: boolean
+        required: false
+        default: true
+      wine-smoke:
+        description: Run `smoke` under wine on the Linux builder first, for a faster red.
+        type: boolean
+        required: false
+        default: true
+      min-pes:
+        description: >
+          Floor on staged loose .exe/.dll count. 0 only together with
+          min-archives >= 1 (headers+static-lib repo) or lgx-variant: true (a
+          repo whose only Windows artifact is a .lgx — its PEs are gated inside
+          the archive, imports included).
+        type: number
+        required: false
+        default: 1
+      min-archives:
+        description: Floor on staged mingw COFF .a count, for headers+static-lib repos.
+        type: number
+        required: false
+        default: 0
+      lgx-variant:
+        description: >
+          Assert each staged .lgx has a real variants/windows-x86_64 payload.
+          Counts as a floor in its own right, so it is the correct partner for
+          min-pes: 0 / min-archives: 0.
+        type: boolean
+        required: false
+        default: false
+      assemble:
+        description: JSON widening the import search path for multi-derivation apps.
+        type: string
+        required: false
+        default: '{}'
+      extra-gates:
+        description: >
+          bash run after the standard gates, from the repo root with `stage/`
+          present and `$OBJDUMP` pointing at the mingw objdump. For invariants
+          that are genuinely specific to one repo -- the workspace's
+          single-TokenManager topology check is the only one today -- rather
+          than for anything a second repo would also want.
+        type: string
+        required: false
+        default: ''
+      cold-derivation-budget:
+        description: >
+          Fail fast rather than start a build larger than this many derivations.
+          30 comfortably covers a warm-cache incremental (measured: the whole of
+          logoscore-cli's Windows CLI is 100 derivations cold, 24 for
+          logos-module's `bin`, single digits once the shared closure is cached).
+        type: number
+        required: false
+        default: 30
+      timeout-minutes:
+        type: number
+        required: false
+        default: 60
+      submodules:
+        type: string
+        required: false
+        default: 'false'
+      extra-nix-args:
+        description: Appended to every `nix build`/`nix eval` (e.g. --override-input pairs).
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
+
+      # ------------------------------------------------------------------
+      # Validate the smoke inputs HERE, in the job that has the caller's repo
+      # checked out, rather than on the smoke leg that actually uses them. A
+      # mistyped `smoke-file` otherwise surfaces after the whole cross-build --
+      # ten minutes and an artifact upload later -- as `no such file` from a
+      # wrapper whose message is about staged trees and target directories, and
+      # so reads as a path-contract mistake instead of a typo in this YAML.
+      #
+      # Via env, never interpolated into the script text: a caller string that
+      # reaches a shell through `${{ }}` is shell SOURCE. See the header.
+      # ------------------------------------------------------------------
+      - name: Validate the smoke inputs
+        shell: bash
+        env:
+          SMOKE: ${{ inputs.smoke }}
+          SMOKE_FILE: ${{ inputs.smoke-file }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SMOKE" ] && [ -n "$SMOKE_FILE" ]; then
+            echo "::error::both 'smoke' and 'smoke-file' are set. They are two ways to"
+            echo "::error::deliver the SAME script, so having both means one of them is"
+            echo "::error::silently ignored -- and which one is not something a reader of"
+            echo "::error::the caller could work out. Pick one."
+            exit 1
+          fi
+          if [ -n "$SMOKE_FILE" ]; then
+            if [ ! -f "$SMOKE_FILE" ]; then
+              echo "::error::smoke-file: $SMOKE_FILE does not exist in this repo."
+              echo "::error::The path is relative to the CALLER's repo root."
+              echo "::error::Shell scripts found here:"
+              find . -name '*.sh' -not -path './.git/*' | sed -n '1,30p' | sed 's|^|::error::  |'
+              exit 1
+            fi
+            # Not a warning about style: an empty file passes `-f`, produces no
+            # commands, exits 0, and is indistinguishable from a smoke test that
+            # ran and found nothing wrong.
+            if [ ! -s "$SMOKE_FILE" ]; then
+              echo "::error::smoke-file: $SMOKE_FILE is empty. An empty script exits 0"
+              echo "::error::having asserted nothing, which is reported as a pass."
+              exit 1
+            fi
+            echo "smoke-file: $SMOKE_FILE ($(wc -l < "$SMOKE_FILE" | tr -d '[:space:]') lines)"
+          fi
+
+      - uses: logos-co/logos-ci-actions/.github/actions/nix-setup@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          github-token: ${{ github.token }}
+          free-disk-space: 'true'
+
+      # ------------------------------------------------------------------
+      # Anti-silent-skip. A matrix leg that has nothing to do is worse than no
+      # leg at all: it is a permanent green that means nothing. 23 of the 45
+      # repos with linux+macOS CI have no x86_64-windows attribute whatsoever,
+      # so this is the single most likely way this design gets misapplied.
+      # ------------------------------------------------------------------
+      - name: Resolve targets (fails loudly if the repo has no Windows output)
+        id: targets
+        env:
+          TARGETS_IN: ${{ inputs.targets }}
+          EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
+        run: |
+          set -euo pipefail
+          read -r -a TARGETS <<< "$TARGETS_IN"
+          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "::error::no targets given"; exit 1
+          fi
+          if ! nix eval --raw '.#packages.x86_64-windows' --apply 'x: "ok"' \
+                "${NIXARGS[@]}" >/dev/null 2>err.log; then
+            echo "::error::this repo exposes no packages.x86_64-windows."
+            echo "::error::Do not add this workflow to a repo without a Windows target."
+            echo "::error::For a module repo, the port is usually a logos-module-builder bump — nothing else."
+            sed -n '1,20p' err.log
+            exit 1
+          fi
+          have=$(nix eval --raw '.#packages.x86_64-windows' \
+                   --apply 'x: builtins.concatStringsSep " " (builtins.attrNames x)' \
+                   "${NIXARGS[@]}")
+          echo "repo exposes: $have"
+          ATTRS=()
+          for t in "${TARGETS[@]}"; do
+            case " $have " in
+              *" $t "*) ;;
+              *) echo "::error::requested target '$t' is not in packages.x86_64-windows ($have)"; exit 1 ;;
+            esac
+            ATTRS+=(".#packages.x86_64-windows.$t")
+          done
+          printf '%s\n' "${ATTRS[@]}" > attrs.txt
+          printf '%s\n' "${TARGETS[@]}" > targets.txt
+          echo "count=${#ATTRS[@]}" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # Anti-cold-build. Turns a four-hour timeout nobody can interpret into a
+      # sixty-second failure that says what to do. See the header.
+      # ------------------------------------------------------------------
+      - name: Check the cache is primed
+        env:
+          EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
+          BUDGET: ${{ inputs.cold-derivation-budget }}
+        run: |
+          set -euo pipefail
+          mapfile -t ATTRS < attrs.txt
+          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          nix build --dry-run "${ATTRS[@]}" "${NIXARGS[@]}" \
+            2> dry.log || { cat dry.log; exit 1; }
+          # `nix build --dry-run` writes its plan to stderr as
+          # "this derivation will be built:" / "these N derivations will be
+          # built:" followed by one indented path per line. Both spellings are
+          # matched; verified against a real plan from nix 2.34.6.
+          n=$(awk '/will be built/{f=1;next} /will be fetched|^$/{f=0} f&&/^ /{c++} END{print c+0}' dry.log)
+          echo "derivations to build: $n (budget $BUDGET)"
+          sed -n '1,40p' dry.log
+          if [ "$n" -gt "$BUDGET" ]; then
+            echo "::error::$n derivations to build exceeds the budget."
+            echo "::error::This is what an unprimed mingw Qt closure looks like. Building it here"
+            echo "::error::would take hours and probably hit GitHub's 6 h ceiling."
+            echo "::error::Fix: run logos-nix's 'Windows cache prime' workflow, then re-run."
+            echo "::error::If this repo genuinely grew that much, raise cold-derivation-budget."
+            exit 1
+          fi
+
+      - name: Cross-build
+        env:
+          EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
+        run: |
+          set -euo pipefail
+          mapfile -t ATTRS < attrs.txt
+          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          # One invocation so nix parallelises the shared closure rather than
+          # serialising near-identical dependency graphs.
+          nix build "${ATTRS[@]}" "${NIXARGS[@]}" \
+            --print-build-logs --no-link
+
+      - name: Stage
+        env:
+          EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
+        run: |
+          set -euo pipefail
+          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          mkdir -p stage
+          while read -r t; do
+            [ -n "$t" ] || continue
+            # NOT `nix build … | head -1`. `head` exits after the first line
+            # while nix is still printing the remaining outputs of a
+            # multi-output derivation; under `pipefail` that SIGPIPE (141)
+            # becomes the assignment's status and `set -e` kills the step --
+            # a false red whose log says only "Stage". Capture, then take the
+            # first line in the shell, where nothing can be killed.
+            outs=$(nix build --no-link --print-out-paths \
+                     ".#packages.x86_64-windows.$t" "${NIXARGS[@]}")
+            out=${outs%%$'\n'*}
+            [ -n "$out" ] || { echo "::error::nix build printed no out path for '$t'"; exit 1; }
+            mkdir -p "stage/$t"
+            # --no-preserve=mode is load-bearing, not tidiness. Store outputs
+            # are r-xr-xr-x, and a plain `cp -rL` propagates that; the
+            # subsequent `chmod -R u+w` then has to succeed on every directory
+            # before anything can touch the tree. Measured: on a filesystem
+            # where it does not, staging silently produces an EMPTY tree and
+            # `cp` still exits 0 under `set -e` because the failure is in
+            # setting permissions, not in copying. The format gate caught it --
+            # but only because it refuses to pass on zero PEs.
+            cp -rL --no-preserve=mode,ownership "$out"/. "stage/$t"/
+          done < targets.txt
+          # ONE DIRECTORY PER TARGET, and nothing at the root. This is the
+          # contract the smoke script's paths are written against; `stage/bin`
+          # does not exist even for a single-target repo. Verified against a
+          # real staged tree: `stage/` holds only `lgx/`.
+          echo "staged tree root:"; ls -1 stage
+          find stage -type f | wc -l
+
+      - uses: logos-co/logos-ci-actions/.github/actions/windows-gates@v1
+        with:
+          stage-dir: stage
+          min-pes: ${{ inputs.min-pes }}
+          min-archives: ${{ inputs.min-archives }}
+          lgx-variant: ${{ inputs.lgx-variant }}
+          assemble: ${{ inputs.assemble }}
+
+      - name: Repo-specific gates
+        if: inputs.extra-gates != ''
+        env:
+          EXTRA_GATES: ${{ inputs.extra-gates }}
+        run: |
+          set -euo pipefail
+          # $OBJDUMP was resolved from THIS repo's OWN pin by the gates action a
+          # step ago, and proven to support pei-x86-64 there. Resolving a second
+          # one here is how the two copies drift; taking it from the floating
+          # `nixpkgs#` registry -- which is what this step used to do -- is how a
+          # gate ends up reading PEs with a binary nobody pinned.
+          if [ -z "${OBJDUMP:-}" ] || [ ! -x "${OBJDUMP:-}" ]; then
+            echo "::error::OBJDUMP is not set — the windows-gates action must run first."
+            exit 1
+          fi
+          export OBJDUMP
+          # Via env, never interpolated into shell source: a script containing a
+          # single quote would otherwise terminate the quoting and execute
+          # arbitrary fragments. (This workspace's own gate contains three.)
+          printf '%s\n' "$EXTRA_GATES" > "$RUNNER_TEMP/gates.sh"
+          bash -euo pipefail "$RUNNER_TEMP/gates.sh"
+
+      # ------------------------------------------------------------------
+      # The upload/download hop is the one link in this chain nobody has ever
+      # observed. Record the PE set here and re-count it on the far side, so
+      # "the artifact arrived intact" is asserted rather than assumed.
+      #
+      # NOT dot-prefixed: upload-artifact v4 EXCLUDES hidden files unless
+      # include-hidden-files is set, so a `.pe-manifest.txt` would be dropped
+      # silently -- the exact failure class this file exists to detect.
+      # ------------------------------------------------------------------
+      - name: Record the PE manifest for the round-trip check
+        working-directory: stage
+        run: |
+          set -euo pipefail
+          find . -type f \( -name '*.exe' -o -name '*.dll' \) \
+            | sed 's|^\./||' | LC_ALL=C sort > pe-manifest.txt
+          echo "recorded $(wc -l < pe-manifest.txt) PEs"
+          cat pe-manifest.txt
+
+      - name: Record the coverage this run actually bought
+        env:
+          SMOKE: ${{ inputs.smoke }}
+          TARGETS_IN: ${{ inputs.targets }}
+          WINE_SMOKE: ${{ inputs.wine-smoke }}
+          NATIVE_SMOKE: ${{ inputs.native-smoke }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Windows (cross)"
+            echo "- targets: \`$TARGETS_IN\`"
+            echo "- staged PEs: $(wc -l < stage/pe-manifest.txt)"
+            if [ -z "$SMOKE" ]; then
+              echo "- runtime coverage: **NONE — compile-and-inspect only.**"
+              echo "  Nothing in this repo was executed on Windows. Add a \`smoke:\` script."
+            else
+              echo "- runtime coverage: wine=$WINE_SMOKE native=$NATIVE_SMOKE"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$SMOKE" ]; then
+            echo "::warning::compile-only: no Windows binary from this repo was executed."
+          fi
+
+      # The WHOLE staged tree, unfiltered. Both smoke legs run against this
+      # artifact rather than against their own copy, so if they disagree it is a
+      # genuine wine-vs-Windows divergence and not a staging difference.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-${{ github.event.repository.name }}
+          path: stage/
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # THE TWO SMOKE LEGS
+  #
+  # Separate jobs rather than one matrix, on purpose: a matrix leg emptied out
+  # by a step-level `if` still reports green, and a green job that did nothing
+  # is the exact failure mode this whole design exists to avoid. A disabled leg
+  # here does not appear in the run at all.
+  #
+  # Both call the SAME action with the SAME inputs but one -- `wine`. That is
+  # what makes a disagreement between them evidence of a real wine-vs-Windows
+  # divergence rather than of two harnesses that drifted apart.
+  # --------------------------------------------------------------------------
+  wine-smoke:
+    needs: cross-build
+    if: (inputs.smoke != '' || inputs.smoke-file != '') && inputs.wine-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Checked out into `caller/`, and BEFORE the artifact download. Either one
+      # alone would do -- `path:` scopes checkout's clean to that subdirectory,
+      # and going first means there is nothing to clean anyway -- but the cost
+      # of both is zero and the cost of getting it wrong is a `stage/` tree that
+      # vanishes between two steps that each look correct in isolation.
+      - uses: actions/checkout@v4
+        if: inputs.smoke-file != ''
+        with:
+          path: caller
+          submodules: ${{ inputs.submodules }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-${{ github.event.repository.name }}
+          path: stage
+      - uses: logos-co/logos-ci-actions/.github/actions/nix-setup@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          github-token: ${{ github.token }}
+      - uses: logos-co/logos-ci-actions/.github/actions/windows-smoke@v1
+        with:
+          stage-dir: stage
+          smoke: ${{ inputs.smoke }}
+          smoke-file: ${{ inputs.smoke-file }}
+          caller-dir: caller
+          wine: 'true'
+
+  native-smoke:
+    needs: cross-build
+    if: (inputs.smoke != '' || inputs.smoke-file != '') && inputs.native-smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      # The only place in the entire org where a Nix-built PE is executed by
+      # Windows. Nothing is installed on the runner: the import-closure gate in
+      # cross-build already proved every non-system DLL ships inside the tree.
+      # Pre-validated by hand before this file was written -- logos-package's
+      # cross-built lgx.exe plus its seven DLLs, unpacked from a zip onto a
+      # Windows 11 box with no toolchain and no runtime present, ran and printed
+      # 988 bytes of help.
+      - uses: actions/checkout@v4
+        if: inputs.smoke-file != ''
+        with:
+          path: caller
+          submodules: ${{ inputs.submodules }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-${{ github.event.repository.name }}
+          path: stage
+      - uses: logos-co/logos-ci-actions/.github/actions/windows-smoke@v1
+        with:
+          stage-dir: stage
+          smoke: ${{ inputs.smoke }}
+          smoke-file: ${{ inputs.smoke-file }}
+          caller-dir: caller
+          wine: 'false'

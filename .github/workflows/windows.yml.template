@@ -1,0 +1,81 @@
+# Copy to <repo>/.github/workflows/windows.yml and edit the two `with:` lines.
+# This is the ENTIRE per-repo cost of Windows CI. Everything else -- the Nix
+# install pinning, the binary cache, the disk reclaim, the target-existence
+# guard, the cold-cache refusal, the PE-format gate, the import-closure gate,
+# the artifact hand-off and its round-trip check, the wine pre-filter and the
+# real-Windows execution -- lives once in logos-co/logos-ci-actions.
+#
+# DO NOT add this file to a repo with no `packages.x86_64-windows`. The job will
+# fail loudly by design rather than pass by having nothing to do. Check with:
+#   nix eval github:logos-co/<repo>#packages.x86_64-windows --apply builtins.attrNames
+# If that errors and the repo is a logos-module-builder consumer that does not
+# rebuild `packages` over its own hardcoded `systems` list, the port is a
+# module-builder bump and nothing else.
+
+name: Windows
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  windows:
+    uses: logos-co/logos-ci-actions/.github/workflows/windows-ci.yml@v1
+    secrets: inherit
+    with:
+      # Attribute names under packages.x86_64-windows. Whitespace-separated.
+      targets: default
+
+      # bash, run on BOTH wine and a real Windows runner, from the staged tree
+      # ROOT. The root holds ONE DIRECTORY PER TARGET, so every path begins with
+      # the target name. This is the mistake to not make:
+      #
+      #     run default/bin/YOUR_TOOL.exe --version     <- correct
+      #     run bin/YOUR_TOOL.exe --version             <- `stage/bin` does not exist
+      #
+      # `run` is a wrapper on PATH: wine on Linux, a direct exec on Windows, so
+      # one script serves both legs. It refuses a path that does not exist, and
+      # refuses a command that exits 0 having produced no output at all. On any
+      # failure it reports the exit code, both of the program's streams, and a
+      # listing of what shipped beside the binary -- and nothing beyond that.
+      # For a command that is legitimately silent, use `run -q`.
+      #
+      # `$STAGE_ABS` is the tree root as the PE sees it (a Z: path under wine).
+      #
+      # Leave EMPTY only if this repo produces no executable -- the run is then
+      # reported as compile-only, which is a coverage gap, not a pass.
+      smoke: |
+        run default/bin/YOUR_TOOL.exe --version
+
+      # ONCE THIS OUTGROWS A FEW LINES, MOVE IT TO A FILE and use `smoke-file`
+      # instead (the two are mutually exclusive and the workflow refuses both):
+      #
+      #     smoke-file: .github/smoke/YOUR_TOOL.sh
+      #
+      # Identical contract -- same cwd, same `run` wrapper, same `$STAGE_ABS`.
+      # What changes is that a committed file is LINTABLE and RUNNABLE:
+      #   * an inline block is invisible to shellcheck, because actionlint
+      #     substitutes a placeholder for `${{ }}` before linting it;
+      #   * a file can be executed by hand against a NATIVE build during
+      #     development, which is how you find out an assertion never bites.
+      # Setting it is also what makes the smoke jobs check this repo out --
+      # they otherwise only download the artifact.
+
+      # ---- the knobs you will rarely touch --------------------------------
+      # min-pes: 1            floor on staged loose .exe/.dll; a
+      #                       headers+static-lib repo sets `min-pes: 0` AND
+      #                       `min-archives: 1`, and a repo whose only Windows
+      #                       artifact is a .lgx sets `min-pes: 0` AND
+      #                       `lgx-variant: true`
+      # lgx-variant: false    set true if this repo emits a .lgx; it is a floor
+      #                       of its own (refuses a tree with no .lgx, a .lgx
+      #                       with no Windows variant, and a payload whose
+      #                       imports are not bundled with it)
+      # native-smoke: true    run on a real windows-latest runner (free, ~2 min)
+      # wine-smoke: true      run under wine first, for a faster red
+      # cold-derivation-budget: 30
+      #                       refuse to start an unprimed mingw Qt build
+      # assemble: '{}'        widen the import search path for a multi-
+      #                       derivation app, e.g. '{"basecamp":["liblogos/bin"]}'

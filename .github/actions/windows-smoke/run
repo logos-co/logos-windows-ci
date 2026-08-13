@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# `run` -- the one launcher both smoke legs use: wine on the Linux leg, a direct
+# exec on the Windows leg, so one harness serves both.
+#
+# WHAT IT ADDS OVER `exec "$@"`, and nothing else:
+#
+#   * A pre-flight existence check. Without it a missing PATH and a program that
+#     failed to start arrive as the SAME status -- 127 under bash, 53 under wine
+#     -- and neither says which happened. This check is what tells them apart,
+#     so it is reported as a fact: "no such file: X".
+#   * On any failure: the exit code, the program's own stdout verbatim, its
+#     stderr verbatim, and a listing of what actually shipped beside the binary.
+#   * One refusal: exiting 0 having printed nothing at all is a failure here.
+#     `run -q CMD` opts out, for a command that is legitimately silent. That is
+#     a contract with the caller, not a diagnosis.
+#
+# IT DOES NOT DIAGNOSE, AND THAT IS DELIBERATE.
+#   Earlier revisions read a meaning out of the exit code and out of whichever
+#   DLL name happened to appear on stderr. Three successive versions of that
+#   story were measured and found wrong -- the loader's behaviour here is not
+#   stable enough to characterise -- and each one shipped a confident, false
+#   sentence into the CI log of whoever hit it. So the story is gone. This
+#   wrapper reports what the program did and what is on disk; the conclusion is
+#   the reader's.
+#
+# EVERY DIAGNOSTIC THIS SCRIPT EMITS GOES TO STDERR.
+#   Not cosmetic. The documented smoke idiom pipes this wrapper
+#   (`run lgx/bin/lgx.exe --help | tee help.txt`), and a consumer can swallow
+#   whatever it is given. Measured on Windows 11 against a real failing PE
+#   through a `| grep -q` consumer: a report written to stdout reached the log
+#   as one raw line and nothing else. GitHub parses `::error::` on stderr as
+#   well as stdout, so this costs nothing. The PROGRAM's own stdout still goes
+#   to stdout, so a pipeline keeps working -- and on failure it is ALSO
+#   reproduced onto stderr, which is the only way it survives that pipe.
+#
+# CONTRACT
+#   Paths are relative to the staged tree ROOT, which holds one directory per
+#   target: `run lgx/bin/lgx.exe --help`, never `run bin/lgx.exe --help`.
+#   $RUN_EXEC, if set, is prepended (the wine binary). `run -q CMD` permits a
+#   command that legitimately produces no output.
+set -uo pipefail
+
+# All ::error:: output goes to stderr. See above.
+err() { while [ "$#" -gt 0 ]; do printf '::error::%s\n' "$1" >&2; shift; done; }
+# Reproduce captured bytes into the log, one ::error:: per line, verbatim.
+quote() { sed 's/^/::error::  /' >&2; }
+
+RUN_ALLOW_SILENT="${RUN_ALLOW_SILENT:-}"
+if [ "${1:-}" = "-q" ]; then RUN_ALLOW_SILENT=1; shift; fi
+
+pe="${1:-}"
+[ -n "$pe" ] || { err "run: no program given"; exit 1; }
+
+if [ ! -f "$pe" ]; then
+  err "run: no such file: $pe (cwd: $(pwd))." \
+      "Smoke paths are relative to the staged tree ROOT, and the root holds" \
+      "one directory PER TARGET -- so a path starts with the target name:" \
+      "    run lgx/bin/lgx.exe --help      not    run bin/lgx.exe --help" \
+      "staged targets here: $(find . -mindepth 1 -maxdepth 1 -type d \
+                                | sed 's|^\./||' | sort | tr '\n' ' ')"
+  exit 1
+fi
+
+# Captured rather than streamed so that, on failure, both streams can be put
+# back into the log even when the caller has piped stdout away -- and so that
+# "printed nothing at all" is answerable at all. These are short-lived CLIs, so
+# paying for it with a loss of interleaving is the right trade.
+o=$(mktemp); e=$(mktemp)
+if [ -n "${RUN_EXEC:-}" ]; then
+  "$RUN_EXEC" "$@" >"$o" 2>"$e"
+else
+  "$@" >"$o" 2>"$e"
+fi
+rc=$?
+cat "$o"; cat "$e" >&2
+# `wc -c` pads its output on BSD/macOS, and these numbers are printed as well
+# as compared, so keep them bare.
+osz=$(wc -c < "$o" | tr -d '[:space:]'); esz=$(wc -c < "$e" | tr -d '[:space:]')
+
+if [ "$rc" -ne 0 ]; then
+  err "$pe exited $rc."
+  if [ "$osz" -eq 0 ]; then err "stdout: empty."
+  else err "--- stdout ($osz bytes) ---"; quote < "$o"; fi
+  if [ "$esz" -eq 0 ]; then err "stderr: empty."
+  else err "--- stderr ($esz bytes) ---"; quote < "$e"; fi
+  # The single orienting sentence, and only when BOTH streams are empty -- a
+  # program that wrote to stderr plainly reached the point of writing to
+  # stderr, and saying this next to its own message would be misleading. It
+  # states a consistency, not a cause: no diagnosis, no file, no status name.
+  if [ "$osz" -eq 0 ] && [ "$esz" -eq 0 ]; then
+    err "(A non-zero exit with nothing on either stream is consistent with the" \
+        "process having failed before main(). This wrapper does not determine" \
+        "whether it did, or why.)"
+  fi
+  # The tree, reported rather than interpreted.
+  err "--- shipped beside $pe ---"
+  # shellcheck disable=SC2012  # these are DLL names, not arbitrary input
+  ls -1 "$(dirname "$pe")" | quote
+  rm -f "$o" "$e"
+  exit "$rc"
+fi
+rm -f "$o" "$e"
+
+if [ "$osz" -eq 0 ] && [ "$esz" -eq 0 ] && [ -z "$RUN_ALLOW_SILENT" ]; then
+  err "$pe exited 0 and printed nothing at all." \
+      "Silent success is this project's dominant defect class -- an install rule" \
+      "that copied nothing, a package that labelled itself linux-amd64, a plugin" \
+      "shipped without its DLLs, a reply never sent. Every one of them exited 0." \
+      "A smoke test that cannot tell 'it worked' from 'it did nothing' is not" \
+      "coverage." \
+      "If this command is legitimately silent, invoke it as: run -q $pe ..."
+  exit 1
+fi
+
+exit 0

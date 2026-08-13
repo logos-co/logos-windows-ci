@@ -1,0 +1,130 @@
+name: Nix setup
+description: >
+  Install Nix with the Logos binary cache, reclaim disk, and say out loud when
+  the cache is read-only. One copy of a preamble that is otherwise duplicated
+  across 76 workflow files in 61 repos, in 7 mutually incompatible pinnings.
+
+  THIS IS A THIN WRAPPER around logos-co/setup-nix-cache-action, which owns the
+  Nix install and the cache. It deliberately owns neither.
+
+  An earlier revision installed Nix itself and pushed to a cachix cache named
+  `logos-co`. That was a SECOND cache design in an org that already had a
+  sanctioned one -- a self-hosted Attic at cache.nix.logos.co, per
+  status-im/infra-ci#263 -- so two halves of the fleet would have warmed two
+  different caches and neither would have been complete. Nothing about the
+  Windows harness needed its own; it wanted a fast substituter, and that is
+  what the org action provides.
+
+  Its Nix is also newer, not older, which was the one thing worth checking
+  before switching: install-nix-action pins nix_version=2.35.1, comfortably
+  above the 2.26 floor where `--override-input` starts honouring the overridden
+  input's own lock. (The pinning note this action used to carry warned against
+  install-nix-action@v27 -- Nix 2.22 -- and that warning does not transfer to
+  v31, which is what the org action uses.)
+
+  WHAT IS LEFT HERE is exactly what the org action does not do:
+    * reclaim disk before a large closure -- load-bearing, not a nicety;
+    * warn when the cache is read-only, which matters MORE under Attic than it
+      did under cachix, because a master push outside the public-cache
+      environment resolves its token to empty and is skipped silently.
+
+inputs:
+  attic-token-ci:
+    description: >
+      Push token for the `ci` Attic cache; pass secrets.ATTIC_TOKEN_CI. Used on
+      every ref except master/main. Optional: without it the cache is still read
+      (both caches are public to read and the substituters are configured
+      credential-free), which is correct for forked-PR runs where secrets are
+      withheld.
+    required: false
+    default: ''
+  attic-token-public:
+    description: >
+      Push token for the `public` Attic cache; pass secrets.ATTIC_TOKEN_PUBLIC.
+      Used on master/main only. It lives in the public-cache environment, so a
+      job that does not enter that environment resolves it to empty and skips
+      the push rather than failing -- see the read-only warning below, which is
+      the only thing that makes that visible.
+    required: false
+    default: ''
+  github-token:
+    description: Token for nix's github.com access (avoids the 60/hour anonymous budget).
+    required: false
+    default: ''
+  free-disk-space:
+    description: Reclaim ~10 GiB before a large closure. Costs ~20 s.
+    required: false
+    default: 'false'
+  extra-conf:
+    description: Extra lines appended to the Nix config at install time.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Reclaim FIRST. It is the only step here that can fail for lack of room,
+    # and running it after the install would mean the install is what runs out.
+    - name: Free disk space
+      if: inputs.free-disk-space == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ubuntu-latest ships ~14 GiB free; the Windows Qt closure is ~9 GiB.
+        # So this is not housekeeping -- without it the Qt tier does not fit.
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+        df -h /
+
+    # @v1, not @master. That repo runs the same one-train convention this one
+    # does -- v1 == v1.2.0 == 781f072 at time of writing -- and a branch ref
+    # here would make the Nix version and the cache endpoints float, which is
+    # the same "unpinned reader, unpinned verdict" argument the gates and the
+    # wine launcher are pinned for one layer down.
+    - name: Install Nix with the Logos cache
+      uses: logos-co/setup-nix-cache-action@v1
+      with:
+        attic-token-ci: ${{ inputs.attic-token-ci }}
+        attic-token-public: ${{ inputs.attic-token-public }}
+        extra-nix-config: |
+          accept-flake-config = true
+          ${{ inputs.github-token && format('access-tokens = github.com={0}', inputs.github-token) || '' }}
+          ${{ inputs.extra-conf }}
+
+    # An absent token is not an error -- a fork PR legitimately has no secrets --
+    # but it is never harmless, and it is INVISIBLE: the job simply gets slower,
+    # for ever, with nothing in the log to say why. For the Windows target that
+    # is the difference between minutes and hours.
+    #
+    # Checked AFTER the install rather than before, because which token is even
+    # consulted depends on the ref, and that is the org action's rule, not ours:
+    # master/main reads attic-token-public, every other ref reads
+    # attic-token-ci. Warning on the wrong one would be worse than not warning.
+    - name: Warn when the cache is read-only
+      shell: bash
+      env:
+        TOKEN_CI: ${{ inputs.attic-token-ci }}
+        TOKEN_PUBLIC: ${{ inputs.attic-token-public }}
+        IS_DEFAULT: ${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && 'true' || 'false' }}
+      run: |
+        set -euo pipefail
+        if [ "$IS_DEFAULT" = "true" ]; then
+          which=public; tok="$TOKEN_PUBLIC"; secret=ATTIC_TOKEN_PUBLIC
+        else
+          which=ci;     tok="$TOKEN_CI";     secret=ATTIC_TOKEN_CI
+        fi
+        if [ -n "$tok" ]; then
+          echo "Attic cache '$which': read-write (pushing what this job builds)."
+          exit 0
+        fi
+        echo "::warning::\$$secret is empty: the Logos '$which' cache is READ-ONLY here."
+        echo "::warning::Reading still works -- both caches are public to read -- but nothing"
+        echo "::warning::this job builds is pushed, so the next run rebuilds it from source,"
+        echo "::warning::and so does every other repo that needed the same paths."
+        echo "::warning::Expected on a fork PR (secrets are withheld by design)."
+        if [ "$IS_DEFAULT" = "true" ]; then
+          echo "::warning::On master this usually means the job did not enter the public-cache"
+          echo "::warning::environment, where that secret lives. Outside it the token resolves"
+          echo "::warning::to empty and the push is SKIPPED rather than failing -- which is why"
+          echo "::warning::this warning exists at all."
+        fi
