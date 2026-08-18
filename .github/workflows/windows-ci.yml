@@ -151,7 +151,11 @@ on:
         required: false
         default: true
       wine-smoke:
-        description: Run `smoke` under wine on the Linux builder first, for a faster red.
+        description: >
+          Run `smoke` under wine on the Linux builder first, for a faster red.
+          Ignored when `doctest-spec` is set: a generated script calls the PE
+          directly, which bash on Linux cannot exec (126), so the leg could only
+          report a failure that says nothing about Windows.
         type: boolean
         required: false
         default: true
@@ -602,7 +606,16 @@ jobs:
   # --------------------------------------------------------------------------
   wine-smoke:
     needs: cross-build
-    if: (inputs.smoke != '' || inputs.smoke-file != '' || inputs.doctest-spec != '') && inputs.wine-smoke
+    # NOT run for a doctest-spec, and this is structural rather than a policy
+    # choice. A generated script invokes the binary the way the SPEC writes it --
+    # `./cli/bin/lgpm.exe ...` -- because doctest has no business knowing about a
+    # launcher wrapper belonging to this harness. Bash on Linux cannot exec a PE,
+    # so it dies with 126 before wine is ever consulted. Measured on
+    # logos-package-manager#32: the script wrote its variant, packed a .lgx and
+    # listed it, then exited 126 at the first lgpm.exe call, while the native leg
+    # passed. An inline `smoke:` goes through `run` and is unaffected, which is
+    # why wine stays available -- it is only ever a false red on this path.
+    if: (inputs.smoke != '' || inputs.smoke-file != '') && inputs.wine-smoke && inputs.doctest-spec == ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
