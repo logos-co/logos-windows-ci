@@ -105,6 +105,46 @@ on:
         type: string
         required: false
         default: ''
+      doctest-spec:
+        description: >
+          Path, relative to the CALLER's repo, of a `.test.yaml` whose steps are
+          marked with `platform:`. Setting it makes this workflow GENERATE the
+          Windows leg's script from that spec on the builder, run it on the
+          Windows runner, and publish an execution report beside the caller's
+          ubuntu and macos ones.
+
+          This is a THIRD way to deliver a smoke script, alongside `smoke` and
+          `smoke-file`, and mutually exclusive with both. What it buys over them
+          is the report: the same two-column HTML the doc-tests already produce,
+          for the half of a tutorial that runs on Windows, rather than a pass/fail
+          nobody can read afterwards.
+
+          The spec must mark that half -- see logos-doctest's
+          doctests/08-cross-platform.test.yaml. An unmarked spec would emit every
+          step including the nix ones, which cannot run there.
+        type: string
+        required: false
+        default: ''
+      doctest-artifact:
+        description: >
+          Artifact-name PREFIX for the published report, matching what the
+          caller's own doc-test job uses. This workflow uploads
+          `<prefix>-windows-latest` containing index.html, so the caller's
+          publish job picks it up by adding `windows-latest` to the OS list it
+          already loops over. Required when `doctest-spec` is set.
+        type: string
+        required: false
+        default: ''
+      doctest-ext:
+        description: "What {ext} expands to on the target (default: dll)."
+        type: string
+        required: false
+        default: dll
+      doctest-platform:
+        description: "Which platform's steps to emit (default: windows)."
+        type: string
+        required: false
+        default: windows
       native-smoke:
         description: Run `smoke` on a real windows-latest runner. Free on public repos.
         type: boolean
@@ -204,8 +244,48 @@ jobs:
         env:
           SMOKE: ${{ inputs.smoke }}
           SMOKE_FILE: ${{ inputs.smoke-file }}
+          DOCTEST_SPEC: ${{ inputs.doctest-spec }}
+          DOCTEST_ARTIFACT: ${{ inputs.doctest-artifact }}
+          DOCTEST_PLATFORM: ${{ inputs.doctest-platform }}
         run: |
           set -euo pipefail
+          n=0
+          [ -n "$SMOKE" ] && n=$((n+1))
+          [ -n "$SMOKE_FILE" ] && n=$((n+1))
+          [ -n "$DOCTEST_SPEC" ] && n=$((n+1))
+          if [ "$n" -gt 1 ]; then
+            echo "::error::more than one of 'smoke', 'smoke-file' and 'doctest-spec'"
+            echo "::error::is set. They are three ways to deliver the SAME script, so all"
+            echo "::error::but one would be silently ignored -- and which one survives is"
+            echo "::error::not something a reader of the caller could work out. Pick one."
+            exit 1
+          fi
+          if [ -n "$DOCTEST_SPEC" ]; then
+            if [ ! -f "$DOCTEST_SPEC" ]; then
+              echo "::error::doctest-spec: $DOCTEST_SPEC does not exist in this repo."
+              find . -name '*.test.yaml' -not -path './.git/*' | sed -n '1,20p' | sed 's|^|::error::  |'
+              exit 1
+            fi
+            if [ -z "$DOCTEST_ARTIFACT" ]; then
+              echo "::error::doctest-spec is set but doctest-artifact is empty. Without the"
+              echo "::error::artifact-name prefix the report is uploaded under a name the"
+              echo "::error::caller's publish job does not look for -- it would run, pass,"
+              echo "::error::and publish nothing, which is the least useful failure there is."
+              exit 1
+            fi
+            # A spec with no platform marks would emit EVERY step, nix builds
+            # included, and they cannot run on the target. Refuse here rather
+            # than let emit-smoke warn into a log nobody reads.
+            if ! grep -qE '^[[:space:]]*platform:' "$DOCTEST_SPEC"; then
+              echo "::error::$DOCTEST_SPEC marks no section or step with 'platform:', so"
+              echo "::error::every step would be emitted for '$DOCTEST_PLATFORM' -- including"
+              echo "::error::any that build with nix, which does not exist there."
+              echo "::error::Mark the build half 'platform: [linux, macos]' and the run half"
+              echo "::error::'platform: $DOCTEST_PLATFORM'."
+              exit 1
+            fi
+            echo "doctest-spec: $DOCTEST_SPEC -> ${DOCTEST_ARTIFACT}-windows-latest"
+          fi
           if [ -n "$SMOKE" ] && [ -n "$SMOKE_FILE" ]; then
             echo "::error::both 'smoke' and 'smoke-file' are set. They are two ways to"
             echo "::error::deliver the SAME script, so having both means one of them is"
@@ -437,6 +517,35 @@ jobs:
       # include-hidden-files is set, so a `.pe-manifest.txt` would be dropped
       # silently -- the exact failure class this file exists to detect.
       # ------------------------------------------------------------------
+      # ------------------------------------------------------------------
+      # Generate the Windows leg from the caller's spec, INTO the staged tree.
+      # The artifact is already the transport to the Windows runner, so the
+      # script travels with the binaries it drives and the smoke job needs no
+      # checkout of its own.
+      #
+      # It is generated HERE because emit-smoke needs nix, which is the whole
+      # reason the target cannot run doctest itself.
+      # ------------------------------------------------------------------
+      - name: Generate the doctest smoke script
+        if: inputs.doctest-spec != ''
+        env:
+          DOCTEST_SPEC: ${{ inputs.doctest-spec }}
+          DOCTEST_EXT: ${{ inputs.doctest-ext }}
+          DOCTEST_PLATFORM: ${{ inputs.doctest-platform }}
+        run: |
+          set -euo pipefail
+          nix run github:logos-co/logos-doctest -- emit-smoke "$DOCTEST_SPEC" \
+            --platform "$DOCTEST_PLATFORM" --ext "$DOCTEST_EXT" --exe .exe \
+            -o stage/doctest-smoke.sh
+          # An emit-smoke that produced nothing exits non-zero, so reaching here
+          # with no file means the contract changed under us.
+          if [ ! -s stage/doctest-smoke.sh ]; then
+            echo "::error::emit-smoke exited 0 but wrote no script."; exit 1
+          fi
+          echo "generated $(wc -l < stage/doctest-smoke.sh) lines from $DOCTEST_SPEC"
+
+      # (doctest-smoke.sh rides along in the artifact and is invisible to the
+      # manifest below, which enumerates .exe/.dll only.)
       - name: Record the PE manifest for the round-trip check
         working-directory: stage
         run: |
@@ -493,7 +602,7 @@ jobs:
   # --------------------------------------------------------------------------
   wine-smoke:
     needs: cross-build
-    if: (inputs.smoke != '' || inputs.smoke-file != '') && inputs.wine-smoke
+    if: (inputs.smoke != '' || inputs.smoke-file != '' || inputs.doctest-spec != '') && inputs.wine-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -517,16 +626,23 @@ jobs:
           attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
           github-token: ${{ github.token }}
       - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
+        env:
+          # Where the generated script writes its execution records. Relative to
+          # the staged tree, which is the smoke script's cwd.
+          EXECS_OUT: doctest-execs.json
         with:
           stage-dir: stage
           smoke: ${{ inputs.smoke }}
-          smoke-file: ${{ inputs.smoke-file }}
-          caller-dir: caller
+          # A doctest-spec is delivered as a smoke-file that happens to live in
+          # the staged tree rather than the caller's checkout -- so it needs no
+          # new mode in the action, just a different directory.
+          smoke-file: ${{ inputs.doctest-spec != '' && 'doctest-smoke.sh' || inputs.smoke-file }}
+          caller-dir: ${{ inputs.doctest-spec != '' && 'stage' || 'caller' }}
           wine: 'true'
 
   native-smoke:
     needs: cross-build
-    if: (inputs.smoke != '' || inputs.smoke-file != '') && inputs.native-smoke
+    if: (inputs.smoke != '' || inputs.smoke-file != '' || inputs.doctest-spec != '') && inputs.native-smoke
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -547,9 +663,79 @@ jobs:
           name: windows-x86_64-${{ github.event.repository.name }}
           path: stage
       - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
+        env:
+          EXECS_OUT: doctest-execs.json
         with:
           stage-dir: stage
           smoke: ${{ inputs.smoke }}
-          smoke-file: ${{ inputs.smoke-file }}
-          caller-dir: caller
+          smoke-file: ${{ inputs.doctest-spec != '' && 'doctest-smoke.sh' || inputs.smoke-file }}
+          caller-dir: ${{ inputs.doctest-spec != '' && 'stage' || 'caller' }}
           wine: 'false'
+
+      # The records are produced on Windows and rendered on Linux, because
+      # `assemble` needs nix. This is the hand-off.
+      - name: Upload the doctest execution records
+        if: ${{ always() && inputs.doctest-spec != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctest-execs-${{ github.event.repository.name }}
+          path: stage/doctest-execs.json
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # The report. Runs on Linux because `assemble` and `report` need nix, which is
+  # the whole reason the target could not run doctest in the first place.
+  # ══════════════════════════════════════════════════════════════════════════
+  doctest-report:
+    name: Publish the Windows doctest report
+    needs: native-smoke
+    # `always()`: a FAILING run is exactly when the report is worth reading, and
+    # the records exist either way -- the generated script writes them
+    # incrementally so a script that died mid-way still yields what did run.
+    if: ${{ always() && inputs.doctest-spec != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: caller
+          submodules: ${{ inputs.submodules }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: doctest-execs-${{ github.event.repository.name }}
+          path: execs
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          github-token: ${{ github.token }}
+
+      - name: Assemble and render
+        env:
+          DOCTEST_SPEC: ${{ inputs.doctest-spec }}
+          DOCTEST_PLATFORM: ${{ inputs.doctest-platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # `assemble` refuses a records file with nothing in it, and `report`
+          # refuses a payload with no execution records -- both would otherwise
+          # render as a complete-looking tutorial that asserted nothing. Neither
+          # refusal is caught here: if the Windows leg produced no records, this
+          # job SHOULD fail rather than publish a reassuring empty page.
+          nix run github:logos-co/logos-doctest -- assemble \
+            "caller/$DOCTEST_SPEC" execs/doctest-execs.json \
+            -o out/results.json --platform-label "$DOCTEST_PLATFORM-latest"
+          nix run github:logos-co/logos-doctest -- report \
+            out/results.json -o out/index.html
+          echo "report: $(wc -c < out/index.html) bytes"
+
+      # Named to match what the caller's own doc-test job uploads, so its
+      # existing publish step picks this up by adding one OS to the list it
+      # already loops over. results.json rides along so a caller that also
+      # emits `--results` on its other legs can MERGE them into one document
+      # later -- `doctest report a.json b.json` takes any number.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.doctest-artifact }}-windows-latest
+          path: out/
+          if-no-files-found: error
