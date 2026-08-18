@@ -491,7 +491,8 @@ stack does not, in either cache — `qtbase`, `qtdeclarative`, `qtsvg`,
 will ever fill it: nixpkgs' Hydra does not build cross Qt.
 
 **So priming is a prerequisite, not an optimisation.** Run
-`windows-cache-prime.yml` to green before enabling any Qt-dependent caller. Until
+the prime job in logos-basecamp to green before enabling any Qt-dependent
+caller — it holds the Attic credentials and builds by flakeref. Until
 then, `windows-ci.yml` refuses to start a build over `cold-derivation-budget`
 (default 30 derivations) and tells you to prime — a 60-second red instead of a
 four-hour one.

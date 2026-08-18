@@ -19,14 +19,25 @@ name: Windows (cross)
 #   that counts and wine only buys a faster red.
 #
 # THE COST MODEL, WHICH THE CALLER DOES NOT GET TO IGNORE
-#   The mingw *toolchain* is cached upstream (cache.nixos.org, 200). The mingw
-#   *Qt* stack is not, in either cache -- qtbase, qtdeclarative, qtsvg,
-#   qtremoteobjects, icu4c and boost were all measured 404 in both. Building
-#   that from source is hours, and GitHub's ceiling is 6 h. So this workflow
-#   REFUSES to start a cold Qt build (see the derivation-budget step) rather
-#   than time out after four hours in a way nobody can read. Prime the cache
-#   once, from logos-nix's windows-cache-prime.yml, before enabling any
-#   Qt-dependent caller.
+#   The mingw *toolchain* substitutes from cache.nixos.org. The mingw *Qt* stack
+#   does not, anywhere: qtbase, qtdeclarative, qtsvg, qtremoteobjects, icu and
+#   boost were measured 404 across all four caches -- attic/public, attic/ci,
+#   cache.nixos.org and logos-co.cachix.org -- because nixpkgs' Hydra does not
+#   build cross Qt, so nobody upstream will ever fill it.
+#
+#   AS OF 2026-08-18 THAT CLOSURE IS PRIMED: all six are HTTP 200 in
+#   cache.nix.logos.co/ci, pushed by the prime job in logos-basecamp (which is
+#   where the Attic credentials live; it builds by flakeref and depends on
+#   nothing in that repo). Two staged runs, 50 min + 38 min. The Qt tier is
+#   therefore no longer blocked on priming.
+#
+#   The budget step below stays, because the priming is keyed to logos-nix's
+#   flake.lock: bump the nixpkgs-windows rev and every primed path becomes a
+#   miss again. That is the case it exists for -- refuse in a minute with
+#   instructions rather than time out after four hours in a way nobody can read.
+#   Re-prime by re-running that job; there is no longer an automatic trigger,
+#   logos-nix's copy having been closed unmerged (those paths changed 3 times in
+#   6 months, so this is a deliberate trade).
 #
 # CALLER STRINGS ARE DATA, NEVER SHELL SOURCE
 #   Every `inputs.*` that reaches a shell does so through `env:`. GitHub
@@ -329,7 +340,11 @@ jobs:
             echo "::error::$n derivations to build exceeds the budget."
             echo "::error::This is what an unprimed mingw Qt closure looks like. Building it here"
             echo "::error::would take hours and probably hit GitHub's 6 h ceiling."
-            echo "::error::Fix: run logos-nix's 'Windows cache prime' workflow, then re-run."
+            echo "::error::Fix: re-prime the cache, then re-run. The prime job lives in"
+            echo "::error::logos-basecamp (.github/workflows/windows-cache-prime.yml on the"
+            echo "::error::ci/windows-cache-prime branch), which holds the Attic credentials;"
+            echo "::error::it builds by flakeref and depends on nothing in that repo. Stages"
+            echo "::error::1 and 2 cover the Qt closure and took 50 and 38 minutes."
             echo "::error::If this repo genuinely grew that much, raise cold-derivation-budget."
             exit 1
           fi
