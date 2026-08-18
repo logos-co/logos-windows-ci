@@ -1,7 +1,7 @@
 name: Nix setup
 description: >
-  Install Nix with the Logos binary cache, reclaim disk, and say out loud when
-  the cache is read-only. One copy of a preamble that is otherwise duplicated
+  Install Nix with the Logos binary cache, optionally reclaim disk, and say out
+  loud when the cache is read-only. One copy of a preamble that is otherwise duplicated
   across 76 workflow files in 61 repos, in 7 mutually incompatible pinnings.
 
   THIS IS A THIN WRAPPER around logos-co/setup-nix-cache-action, which owns the
@@ -23,7 +23,7 @@ description: >
   v31, which is what the org action uses.)
 
   WHAT IS LEFT HERE is exactly what the org action does not do:
-    * reclaim disk before a large closure -- load-bearing, not a nicety;
+    * reclaim disk before a large closure -- OFF by default, see below;
     * warn when the cache is read-only, which matters MORE under Attic than it
       did under cachix, because a master push outside the public-cache
       environment resolves its token to empty and is skipped silently.
@@ -52,7 +52,13 @@ inputs:
     required: false
     default: ''
   free-disk-space:
-    description: Reclaim ~10 GiB before a large closure. Costs ~20 s.
+    description: >
+      Reclaim ~10 GiB before a large closure. Costs ~20 s. Default false, and
+      the Windows workflow here no longer asks for it: the claim that justified
+      it -- "ubuntu-latest ships ~14 GiB free" -- is stale. A real run of the
+      Windows job reports 145G total with 108G AVAILABLE, so the reclaim was
+      freeing 10 GiB into 108 GiB of slack. Kept for a job that is genuinely
+      disk-bound, and measure before setting it.
     required: false
     default: 'false'
   extra-conf:
@@ -70,8 +76,10 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # ubuntu-latest ships ~14 GiB free; the Windows Qt closure is ~9 GiB.
-        # So this is not housekeeping -- without it the Qt tier does not fit.
+        # Opt-in only. GitHub's hosted runners now ship ~108 GiB free, so the
+        # "~14 GiB" figure this step was built on no longer describes them --
+        # print df either side rather than trusting a remembered number.
+        df -h /
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                     /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
         df -h /
