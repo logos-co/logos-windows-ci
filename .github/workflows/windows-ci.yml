@@ -264,17 +264,27 @@ jobs:
               *" $t "*) ;;
               *) echo "::error::requested target '$t' is not in packages.x86_64-windows ($have)"; exit 1 ;;
             esac
-            # THE NAME EXISTING IS NOT THE TARGET RESOLVING, and the gap between
-            # the two is a whole class of confusing red. `builtins.attrNames`
+            # THE NAME EXISTING IS NOT THE TARGET RESOLVING. `builtins.attrNames`
             # above forces only the attrset's SPINE; a target's own derivation
-            # can still fail to evaluate underneath it. Measured on
-            # logos-basecamp at master: `packages.x86_64-windows` lists fifteen
-            # targets and `.default.drvPath` fails with
-            #     error: attribute 'x86_64-windows' missing
-            # -- raised by a DEPENDENCY flake whose pin predates its own Windows
-            # port. Without this step that surfaces later and elsewhere, naming
-            # an attribute the caller never wrote, and reads like a bug in this
-            # workflow rather than a stale input in the repo.
+            # can still fail to evaluate underneath it, and the gap between the
+            # two is a whole class of confusing red -- it surfaces later and
+            # elsewhere, naming an attribute the caller never wrote, and reads
+            # like a bug in this workflow rather than a stale input in the repo.
+            #
+            # WHERE THIS CAME FROM, stated accurately because the first version
+            # of this comment did not: it was motivated by logos-basecamp
+            # appearing to list fifteen targets while `.default.drvPath` failed
+            # with `attribute 'x86_64-windows' missing`. That was MY measurement
+            # and not basecamp -- `nix eval github:...` served a cached flake
+            # resolution from before a flake.lock bump (the fetch TTL is an
+            # hour), so I was evaluating a stale master. Against current master
+            # basecamp resolves fine. Do not cite it as the example.
+            #
+            # The check stays: the property it asserts is real, a stale
+            # dependency pin is a live hazard here (--override-input reaches only
+            # the TOP-level input while each dependency resolves its own lock),
+            # and the cost is one eval against an attrset the previous step has
+            # already forced. It is insurance, not a fix for an observed break.
             if ! drv=$(nix eval --raw ".#packages.x86_64-windows.$t.drvPath" \
                          "${NIXARGS[@]}" 2>tgt.log); then
               echo "::error::target '$t' is listed but does not EVALUATE."
