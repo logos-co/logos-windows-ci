@@ -493,6 +493,11 @@ will ever fill it: nixpkgs' Hydra does not build cross Qt.
 **So priming is a prerequisite, not an optimisation.** Run
 the prime job in logos-basecamp to green before enabling any Qt-dependent
 caller — it holds the Attic credentials and builds by flakeref. Until
-then, `windows-ci.yml` refuses to start a build over `cold-derivation-budget`
-(default 30 derivations) and tells you to prime — a 60-second red instead of a
-four-hour one.
+then, `windows-ci.yml` refuses to start a build whose plan contains the
+expensive shared closure — Qt, icu, boost, llvm — and tells you to prime: a
+60-second red instead of a four-hour one. It refuses on the CONTENT of the plan
+rather than its size, because those are different questions. A Rust module
+legitimately plans 100+ crate derivations that build in seconds; counting those
+the same way made this step fire on repo size and reported it as a cold cache.
+`cold-derivation-budget` (default 150) survives as a secondary ceiling for a
+plan that has grown implausibly with no heavy package in it.

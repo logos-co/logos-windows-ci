@@ -198,13 +198,15 @@ on:
         default: ''
       cold-derivation-budget:
         description: >
-          Fail fast rather than start a build larger than this many derivations.
-          30 comfortably covers a warm-cache incremental (measured: the whole of
-          logoscore-cli's Windows CLI is 100 derivations cold, 24 for
-          logos-module's `bin`, single digits once the shared closure is cached).
+          Secondary ceiling on plan size. The PRIMARY refusal is now the
+          presence of the expensive shared closure (Qt, icu, boost, llvm) in the
+          plan, which is what actually turns a run into a four-hour one; this
+          number only catches a repo that has grown implausibly. 150 covers the
+          largest measured Rust module (144 derivations, no Qt) with room to
+          spare. Raise it with the measured number in a comment.
         type: number
         required: false
-        default: 30
+        default: 150
       timeout-minutes:
         type: number
         required: false
@@ -416,19 +418,46 @@ jobs:
           # "this derivation will be built:" / "these N derivations will be
           # built:" followed by one indented path per line. Both spellings are
           # matched; verified against a real plan from nix 2.34.6.
-          n=$(awk '/will be built/{f=1;next} /will be fetched|^$/{f=0} f&&/^ /{c++} END{print c+0}' dry.log)
-          echo "derivations to build: $n (budget $BUDGET)"
+          awk '/will be built/{f=1;next} /will be fetched|^$/{f=0} f&&/^ /{print $1}' dry.log > plan.txt
+          n=$(wc -l < plan.txt)
+          # WHAT ACTUALLY COSTS HOURS. A cold plan is not uniformly expensive: a
+          # Rust crate builds in seconds and a repo legitimately has dozens of
+          # them, while one cold qtbase is most of an afternoon. Counting both
+          # the same way made this step fire on repo SIZE -- measured across the
+          # wallet chain, ui_qml modules plan 13 derivations and Rust ones 28 to
+          # 144, none of them containing any Qt at all, against a budget of 30.
+          # Five repos ended up carrying a raised budget for one upstream bug.
+          #
+          # Names are nix pnames, cross and native alike. Source and fetch
+          # derivations are dropped so `icu4c-76_1-src.tgz` does not read as a
+          # cold icu4c. `boost-build-*` and `clang-src-*` DO match, deliberately:
+          # they appear only when the real thing is being built too, and a guard
+          # whose job is to refuse a four-hour run should fail safe.
+          heavy_re='qtbase|qtdeclarative|qtshadertools|qttools|qtsvg|qtremoteobjects|qt5compat|qtwayland|qtwebengine|qtmultimedia|icu4c|boost|llvm|clang|chromium|webkitgtk'
+          names=$(sed 's|.*/[a-z0-9]\{32\}-||; s|\.drv$||' plan.txt \
+                  | grep -vE '\.(tar\.[a-z0-9]+|tgz|zip|patch|diff)$' || true)
+          heavy=$(printf '%s\n' "$names" | grep -cE "^(${heavy_re})-" || true)
+          echo "derivations to build: $n (heavy: $heavy, budget $BUDGET)"
           sed -n '1,40p' dry.log
-          if [ "$n" -gt "$BUDGET" ]; then
-            echo "::error::$n derivations to build exceeds the budget."
-            echo "::error::This is what an unprimed mingw Qt closure looks like. Building it here"
-            echo "::error::would take hours and probably hit GitHub's 6 h ceiling."
+          if [ "$heavy" -gt 0 ]; then
+            echo "::error::$heavy of $n derivations are the expensive shared closure"
+            echo "::error::(Qt, icu, boost, llvm). THAT is an unprimed cache, and building it"
+            echo "::error::here would take hours and probably hit GitHub's 6 h ceiling."
             echo "::error::Fix: re-prime the cache, then re-run. The prime job lives in"
             echo "::error::logos-basecamp (.github/workflows/windows-cache-prime.yml on the"
             echo "::error::ci/windows-cache-prime branch), which holds the Attic credentials;"
             echo "::error::it builds by flakeref and depends on nothing in that repo. Stages"
             echo "::error::1 and 2 cover the Qt closure and took 50 and 38 minutes."
-            echo "::error::If this repo genuinely grew that much, raise cold-derivation-budget."
+            printf '%s\n' "$names" | grep -E "^(${heavy_re})-" | sort -u \
+              | sed 's/^/::error::  /' || true
+            exit 1
+          fi
+          if [ "$n" -gt "$BUDGET" ]; then
+            echo "::error::$n derivations to build exceeds the budget of $BUDGET, and NONE"
+            echo "::error::of them is the expensive shared closure -- so this is this repo's"
+            echo "::error::own size, not a cold cache, and nothing here will take hours."
+            echo "::error::Raise cold-derivation-budget, and put the MEASURED number in the"
+            echo "::error::comment so the next person can tell growth from breakage."
             exit 1
           fi
 
