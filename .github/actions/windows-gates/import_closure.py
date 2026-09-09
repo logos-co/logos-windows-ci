@@ -27,7 +27,7 @@ FLAT_TREE = os.environ.get("FLAT_TREE") == "1"
 SYSTEM = (
     "kernel32 ntdll user32 advapi32 ws2_32 mswsock shell32 ole32 "
     "oleaut32 version winmm netapi32 userenv authz mpr crypt32 "
-    "bcrypt secur32 dbghelp psapi imm32 gdi32 comdlg32 shlwapi "
+    "bcrypt bcryptprimitives secur32 dbghelp psapi imm32 gdi32 comdlg32 shlwapi "
     "iphlpapi dnsapi wtsapi32 setupapi winspool rpcrt4 msvcrt "
     "uxtheme dwmapi d3d9 d3d11 d3d12 dxgi dwrite opengl32 wldap32 "
     "normaliz winhttp wininet ncrypt cfgmgr32 powrprof propsys "
