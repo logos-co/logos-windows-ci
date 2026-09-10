@@ -121,6 +121,16 @@ staged trees and read as a path-contract mistake. An **empty** file is refused
 too, at both layers: it satisfies `-f`, runs, asserts nothing, exits 0, and is
 otherwise indistinguishable from a smoke test that passed.
 
+### Submodules
+
+To enable submodules support, set `submodules` to `recursive`.
+
+```yaml
+    with:
+      submodules: recursive
+      targets: libstorage
+```
+
 ## `run`, and what it does and does not claim
 
 Every PE is launched through a `run` wrapper on `PATH` — wine on the Linux leg,
