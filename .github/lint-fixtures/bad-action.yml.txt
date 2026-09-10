@@ -4,7 +4,7 @@
 # It lives in its own file, with an extension the linter does not collect, for
 # two reasons: the linter must not lint its own fixture, and holding these
 # literals inside lint-actions.sh made that script trip its own rules the moment
-# the script itself came into scope. Three run: blocks, one broken rule each,
+# the script itself came into scope. Four run: blocks, one broken rule each,
 # plus rule (4) in a DESCRIPTION rather than a run: block -- which is where the
 # real instance was, and why rule (4) is a whole-file scan instead of a yq walk
 # over the keys the other rules look at.
@@ -25,6 +25,12 @@ runs:
       run: |
         set -euo pipefail
         if [ -z "${{ inputs.smoke }}" ]; then echo no; fi
+    # rule (5): `read -r -a` from a herestring keeps only the first LINE.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        read -r -a TARGETS <<< "$TARGETS_IN"
+        echo "${TARGETS[@]}"
     # rule (1): a plain shellcheck finding (SC2086 etc).
     - shell: bash
       run: |

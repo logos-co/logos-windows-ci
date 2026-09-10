@@ -54,9 +54,10 @@ on:
     inputs:
       targets:
         description: >
-          Whitespace-separated attribute names under `packages.x86_64-windows`.
-          Each becomes a subdirectory of the staged tree, so a smoke script
-          refers to `<target>/bin/foo.exe`.
+          Whitespace-separated attribute names under `packages.x86_64-windows`
+          -- spaces or newlines, so a YAML block scalar works as well as one
+          line. Each becomes a subdirectory of the staged tree, so a smoke
+          script refers to `<target>/bin/foo.exe`.
         type: string
         required: false
         default: default
@@ -337,11 +338,27 @@ jobs:
           EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
         run: |
           set -euo pipefail
-          read -r -a TARGETS <<< "$TARGETS_IN"
-          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          # `read -r -a` consumes exactly ONE LINE. These inputs are documented
+          # as whitespace-separated, and a YAML block scalar --
+          #     targets: |
+          #       libverifproxy
+          #       default
+          # -- is the obvious way to write a list, so a caller that used one
+          # silently got only its FIRST target. Measured: the second target
+          # never built, `stage/` held one directory, and the run failed much
+          # later in min-pes as "a target installed nothing" -- which names the
+          # wrong cause, since no target installed nothing, one never ran.
+          # `read -d ''` consumes to EOF instead and splits on IFS, which
+          # already includes newline. It returns 1 at EOF: the only way it
+          # fails here, hence `|| true`.
+          TARGETS=(); NIXARGS=()
+          read -r -d '' -a TARGETS <<< "$TARGETS_IN" || true
+          read -r -d '' -a NIXARGS <<< "$EXTRA_NIX_ARGS" || true
           if [ "${#TARGETS[@]}" -eq 0 ]; then
             echo "::error::no targets given"; exit 1
           fi
+          # Echoed because the truncation above was invisible for a whole run.
+          echo "targets parsed: ${#TARGETS[@]} (${TARGETS[*]})"
           if ! nix eval --raw '.#packages.x86_64-windows' --apply 'x: "ok"' \
                 "${NIXARGS[@]}" >/dev/null 2>err.log; then
             echo "::error::this repo exposes no packages.x86_64-windows."
@@ -411,7 +428,8 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t ATTRS < attrs.txt
-          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          NIXARGS=()
+          read -r -d '' -a NIXARGS <<< "$EXTRA_NIX_ARGS" || true
           nix build --dry-run "${ATTRS[@]}" "${NIXARGS[@]}" \
             2> dry.log || { cat dry.log; exit 1; }
           # `nix build --dry-run` writes its plan to stderr as
@@ -467,7 +485,8 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t ATTRS < attrs.txt
-          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          NIXARGS=()
+          read -r -d '' -a NIXARGS <<< "$EXTRA_NIX_ARGS" || true
           # One invocation so nix parallelises the shared closure rather than
           # serialising near-identical dependency graphs.
           nix build "${ATTRS[@]}" "${NIXARGS[@]}" \
@@ -478,7 +497,8 @@ jobs:
           EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
         run: |
           set -euo pipefail
-          read -r -a NIXARGS <<< "$EXTRA_NIX_ARGS"
+          NIXARGS=()
+          read -r -d '' -a NIXARGS <<< "$EXTRA_NIX_ARGS" || true
           mkdir -p stage
           while read -r t; do
             [ -n "$t" ] || continue
