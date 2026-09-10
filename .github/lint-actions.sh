@@ -60,6 +60,11 @@
 #      `.github/workflows`, so an `action.yml` is never handed to it -- the
 #      exact gap this script exists to close. Writing the syntax in a `#`
 #      COMMENT is safe and remains allowed: comments are not parsed.
+#   5. NO `read -r -a ARR <<<"$INPUT"` without `-d ''`. `read` consumes exactly
+#      ONE LINE, so an input a caller wrote as a YAML block scalar loses every
+#      element after the first -- SILENTLY. This is rule (3)'s truncation
+#      without rule (3)'s pipe, which is why (3) did not catch it: it shipped
+#      here on `inputs.targets`, and a caller listing two targets built one.
 #
 # Usage: .github/lint-actions.sh [--self-test]
 set -euo pipefail
@@ -130,6 +135,19 @@ promotes that to the pipeline's status: a false red in a plain command, and a
 SILENT PASS when the pipeline is an \`if\` condition. Capture, then test --
   names=\$(tar tzf \"\$f\"); grep -q PATTERN <<<\"\$names\"
 For a truncated diagnostic use \`sed -n '1,Np'\`, which reads to EOF."
+    while IFS=: read -r ln rest; do
+      echo "::error::    $rel:$((off + ln)): $rest"
+    done < "$TMP/hits"
+  fi
+
+  # (5) the one-line-`read` class. Same truncation as (3), no pipe, so the
+  # pattern above cannot see it. `-d ''` is the opt-out because it is the fix.
+  if grep -nE 'read([[:space:]]+-[a-zA-Z]+)*[[:space:]]+-[a-zA-Z]*a[a-zA-Z]*([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*<<<' \
+       "$TMP/code.sh" | grep -vE "read([[:space:]]+-[a-zA-Z]+)*[[:space:]]+-d[[:space:]]+''" > "$TMP/hits"; then
+    fail "$rel" "$line" "\`read -r -a\` from a herestring reads ONE LINE, so a
+::error::  multi-line input silently loses everything after the first element. Use
+::error::    ARR=(); read -r -d '' -a ARR <<<\"\$INPUT\" || true
+::error::  which reads to EOF and splits on IFS (newline included)."
     while IFS=: read -r ln rest; do
       echo "::error::    $rel:$((off + ln)): $rest"
     done < "$TMP/hits"
@@ -267,6 +285,7 @@ if [ "${1:-}" = --self-test ]; then
   saw "(2) interpolation"    "GitHub interpolation inside"
   saw "(3) SIGPIPE"          "piped into a consumer that exits early"
   saw "(4) empty expression" "EMPTY GitHub expression in a YAML value"
+  saw "(5) one-line read"    "from a herestring reads ONE LINE"
   [ "$rc" -ne 0 ] || { echo "::error::self-test: overall status was 0"; st=1; }
 
   echo "--- self-test B: a standalone shell file (rules 1 and 3) ---"
