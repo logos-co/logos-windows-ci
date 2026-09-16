@@ -131,6 +131,22 @@ To enable submodules support, set `submodules` to `recursive`.
       targets: libstorage
 ```
 
+### Windows builds published under the build platform
+
+Targets are looked up in `packages.x86_64-windows` by default. A repo that
+publishes its MinGW build under the platform that builds it, the way zerokit
+does (`packages.x86_64-linux.rln-windows-x86_64`), points `package-set` there
+and lists those attribute names:
+
+```yaml
+    with:
+      package-set: packages.x86_64-linux
+      targets: liblogosdelivery-windows-x86_64 logosdeliverynode-windows-x86_64
+```
+
+Each staged directory takes its target's attribute name, so the smoke script's
+paths start with `liblogosdelivery-windows-x86_64/`, not `liblogosdelivery/`.
+
 ## `run`, and what it does and does not claim
 
 Every PE is launched through a `run` wrapper on `PATH` — wine on the Linux leg,
