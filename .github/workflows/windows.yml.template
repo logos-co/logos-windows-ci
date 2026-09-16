@@ -26,6 +26,8 @@ jobs:
     secrets: inherit
     with:
       # Attribute names under packages.x86_64-windows. Whitespace-separated.
+      # A repo that publishes them elsewhere (e.g. zerokit-style
+      # packages.x86_64-linux.<name>-windows-x86_64) also sets `package-set`.
       targets: default
 
       # bash, run on BOTH wine and a real Windows runner, from the staged tree
