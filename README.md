@@ -36,6 +36,27 @@ target-existence guard, the cold-cache refusal, the PE-format and
 import-closure gates, the artifact hand-off and its round-trip check, the wine
 pre-filter and the real-Windows execution all live here.
 
+If a Windows doctest needs a tool from another flake, use `extra-targets`
+instead of adding that tool to the caller's `flake.nix` just for CI. Each entry
+names its directory in the staged tree and the exact flake output to build:
+
+```yaml
+with:
+  targets: default install-portable
+  extra-targets: >-
+    {"windows-logoscore": {
+      "ref": "github:logos-co/logos-logoscore-cli#packages.x86_64-windows.cli-bundle-dir",
+      "omit": ["lib/qt-6/plugins"]
+    }}
+  doctest-spec: doctests/module-runtime.test.yaml
+  doctest-artifact: module-doctest-report
+```
+
+The external output goes through the same cache check, PE gates and artifact
+hand-off as the caller's outputs. `omit` leaves unused files out of the staged
+copy; it does not change the upstream build. The doctest can then run
+`windows-logoscore/bin/logoscore.exe` from the staged tree.
+
 **Read [`docs/windows-ci.md`](docs/windows-ci.md) before adding a caller.**
 It covers the staged-tree path contract (every smoke path starts with a target
 name — `lgx/bin/lgx.exe`, never `bin/lgx.exe`), what `run` does and does not

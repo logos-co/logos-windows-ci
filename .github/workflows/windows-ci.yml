@@ -61,6 +61,17 @@ on:
         type: string
         required: false
         default: default
+      extra-targets:
+        description: >
+          JSON object mapping staged directory names to external flake outputs,
+          for tools used by the smoke or doctest but not built by the caller.
+          Each value has `ref` (a complete flake output reference) and optional
+          `omit` (relative paths to leave out of that target's staged copy).
+          External targets go through the same cache budget, build, PE gates,
+          artifact hand-off and native smoke as caller targets.
+        type: string
+        required: false
+        default: '{}'
       package-set:
         description: >
           The attribute set `targets` are looked up in. The default is the
@@ -348,6 +359,7 @@ jobs:
         id: targets
         env:
           TARGETS_IN: ${{ inputs.targets }}
+          EXTRA_TARGETS: ${{ inputs.extra-targets }}
           EXTRA_NIX_ARGS: ${{ inputs.extra-nix-args }}
         run: |
           set -euo pipefail
@@ -431,6 +443,39 @@ jobs:
             echo "  $t -> ${drv##*/}"
             ATTRS+=("$FLAKE#$PACKAGE_SET.$t")
           done
+          # Build external test tools from their own flakes, like the Linux and
+          # macOS doctests do. Keep the target name separate from its ref: the
+          # name determines the staged path, while the ref determines the build.
+          printf '%s' "$EXTRA_TARGETS" > extra-targets.json
+          if ! jq -e '
+            type == "object" and all(to_entries[];
+              (.key | test("^[A-Za-z_][A-Za-z0-9_-]*$")) and
+              (.value | type == "object") and
+              (.value.ref | type == "string" and test("^[^[:space:]]+#[A-Za-z0-9_.-]+$")) and
+              ((.value.omit // []) | type == "array" and all(.[];
+                type == "string" and length > 0 and
+                (startswith("/") | not) and
+                (split("/") | all(.[]; . != "" and . != "." and . != "..")) and
+                test("^[A-Za-z0-9_./-]+$"))))
+          ' extra-targets.json >/dev/null; then
+            echo "::error::extra-targets must map safe names to {ref, omit?}."
+            echo "::error::Each ref must be a flake output, and omit paths must stay within the target."
+            exit 1
+          fi
+          while IFS=$'\t' read -r name ref; do
+            [ -n "$name" ] || continue
+            if [[ " ${TARGETS[*]} " == *" $name "* ]]; then
+              echo "::error::extra target '$name' duplicates a caller target"; exit 1
+            fi
+            if ! drv=$(nix eval --raw "$ref.drvPath" "${NIXARGS[@]}" 2>tgt.log); then
+              echo "::error::extra target '$name' does not evaluate: $ref"
+              sed -n '1,25p' tgt.log
+              exit 1
+            fi
+            echo "  $name -> ${drv##*/} ($ref)"
+            TARGETS+=("$name")
+            ATTRS+=("$ref")
+          done < <(jq -r 'to_entries[] | [.key, .value.ref] | @tsv' extra-targets.json)
           printf '%s\n' "${ATTRS[@]}" > attrs.txt
           printf '%s\n' "${TARGETS[@]}" > targets.txt
           echo "count=${#ATTRS[@]}" >> "$GITHUB_OUTPUT"
@@ -518,8 +563,11 @@ jobs:
           NIXARGS=()
           read -r -d '' -a NIXARGS <<< "$EXTRA_NIX_ARGS" || true
           mkdir -p stage
-          while read -r t; do
-            [ -n "$t" ] || continue
+          mapfile -t TARGETS < targets.txt
+          mapfile -t ATTRS < attrs.txt
+          for i in "${!TARGETS[@]}"; do
+            t=${TARGETS[$i]}
+            ref=${ATTRS[$i]}
             # NOT `nix build … | head -1`. `head` exits after the first line
             # while nix is still printing the remaining outputs of a
             # multi-output derivation; under `pipefail` that SIGPIPE (141)
@@ -527,7 +575,7 @@ jobs:
             # a false red whose log says only "Stage". Capture, then take the
             # first line in the shell, where nothing can be killed.
             outs=$(nix build --no-link --print-out-paths \
-                     "$FLAKE#$PACKAGE_SET.$t" "${NIXARGS[@]}")
+                     "$ref" "${NIXARGS[@]}")
             out=${outs%%$'\n'*}
             [ -n "$out" ] || { echo "::error::nix build printed no out path for '$t'"; exit 1; }
             mkdir -p "stage/$t"
@@ -540,7 +588,13 @@ jobs:
             # setting permissions, not in copying. The format gate caught it --
             # but only because it refuses to pass on zero PEs.
             cp -rL --no-preserve=mode,ownership "$out"/. "stage/$t"/
-          done < targets.txt
+            if jq -e --arg name "$t" 'has($name)' extra-targets.json >/dev/null; then
+              while IFS= read -r omit; do
+                [ -n "$omit" ] || continue
+                rm -rf -- "stage/$t/$omit"
+              done < <(jq -r --arg name "$t" '.[$name].omit[]?' extra-targets.json)
+            fi
+          done
           # ONE DIRECTORY PER TARGET, and nothing at the root. This is the
           # contract the smoke script's paths are written against; `stage/bin`
           # does not exist even for a single-target repo. Verified against a
@@ -628,6 +682,8 @@ jobs:
       - name: Record the coverage this run actually bought
         env:
           SMOKE: ${{ inputs.smoke }}
+          SMOKE_FILE: ${{ inputs.smoke-file }}
+          DOCTEST_SPEC: ${{ inputs.doctest-spec }}
           TARGETS_IN: ${{ inputs.targets }}
           WINE_SMOKE: ${{ inputs.wine-smoke }}
           NATIVE_SMOKE: ${{ inputs.native-smoke }}
@@ -637,14 +693,14 @@ jobs:
             echo "### Windows (cross)"
             echo "- targets: \`$TARGETS_IN\`"
             echo "- staged PEs: $(wc -l < stage/pe-manifest.txt)"
-            if [ -z "$SMOKE" ]; then
+            if [ -z "$SMOKE" ] && [ -z "$SMOKE_FILE" ] && [ -z "$DOCTEST_SPEC" ]; then
               echo "- runtime coverage: **NONE — compile-and-inspect only.**"
               echo "  Nothing in this repo was executed on Windows. Add a \`smoke:\` script."
             else
               echo "- runtime coverage: wine=$WINE_SMOKE native=$NATIVE_SMOKE"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ -z "$SMOKE" ]; then
+          if [ -z "$SMOKE" ] && [ -z "$SMOKE_FILE" ] && [ -z "$DOCTEST_SPEC" ]; then
             echo "::warning::compile-only: no Windows binary from this repo was executed."
           fi
 
