@@ -1,0 +1,94 @@
+name: Windows tests
+description: >
+  Run the test suites a staged Windows tree declares in
+  <target>/share/logos-tests/*.json -- natively on windows-latest, or under the
+  pinned wine on ubuntu-latest -- to the end whatever fails, the way ctest
+  does. Writes one JUnit file per suite, a log per failed case and a run-page
+  summary, and uploads them. The manifest schema is in docs/windows-ci.md.
+
+inputs:
+  stage-dir:
+    description: Directory the artifact was downloaded (or staged) into.
+    required: false
+    default: stage
+  wine:
+    description: "'true' to run every PE through wine (the Linux leg)."
+    required: false
+    default: 'false'
+  check-only:
+    description: >
+      'true' to validate the manifests against the staged tree and print the
+      plan, running nothing. The builder does this, so a bad manifest fails
+      before the artifact is uploaded.
+    required: false
+    default: 'false'
+  budget-minutes:
+    description: >
+      The job's own timeout. The runner stops starting cases a few minutes
+      before it, so the report is still written and uploaded.
+    required: false
+    default: '60'
+  results-name:
+    description: Artifact name for the results; empty uploads nothing.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    # The same pinned wine the smoke leg uses; see windows-smoke/action.yml.
+    - name: Resolve the pinned wine
+      id: wine
+      if: inputs.wine == 'true' && inputs.check-only != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        ROOT=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
+        if [ ! -f "$ROOT/flake.nix" ] || [ ! -f "$ROOT/flake.lock" ]; then
+          echo "::error::expected the logos-windows-ci flake at $ROOT; wine must come from its pin."
+          exit 1
+        fi
+        outs=$(nix build --no-link --no-write-lock-file --print-out-paths \
+                 "path:$ROOT#legacyPackages.x86_64-linux.wine64Packages.minimal")
+        WINE_OUT="${outs%%$'\n'*}"
+        launcher=
+        for c in wine64 wine; do
+          if [ -x "$WINE_OUT/bin/$c" ]; then launcher="$WINE_OUT/bin/$c"; break; fi
+        done
+        [ -n "$launcher" ] || { echo "::error::no wine launcher in $WINE_OUT/bin"; exit 1; }
+        "$launcher" --version
+        echo "launcher=$launcher" >> "$GITHUB_OUTPUT"
+
+    - name: Run the declared suites
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage-dir }}
+        CHECK_ONLY: ${{ inputs.check-only }}
+        LAUNCHER: ${{ steps.wine.outputs.launcher }}
+        BUDGET_MINUTES: ${{ inputs.budget-minutes }}
+      run: |
+        set -euo pipefail
+        script="$GITHUB_ACTION_PATH/run_tests.py"
+        if [ "$CHECK_ONLY" = 'true' ]; then
+          python "$script" --stage "$STAGE" --check
+          exit 0
+        fi
+        args=(--stage "$STAGE" --results test-results)
+        [ -z "$LAUNCHER" ] || args+=(--wine "$LAUNCHER")
+        # Five minutes for listing, the summary and the upload.
+        budget=$(( BUDGET_MINUTES * 60 - 300 ))
+        [ "$budget" -gt 60 ] || budget=60
+        python "$script" "${args[@]}" --budget-seconds "$budget"
+
+    - name: Upload the results
+      if: always() && inputs.results-name != '' && inputs.check-only != 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.results-name }}
+        path: test-results/
+        if-no-files-found: warn
+        retention-days: 14

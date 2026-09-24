@@ -167,6 +167,36 @@ on:
         type: string
         required: false
         default: windows
+      tests:
+        description: >
+          Run the test suites the staged targets declare in
+          `<target>/share/logos-tests/*.json` (schema in docs/windows-ci.md) on
+          a real windows-latest runner, and under wine when wine-tests is set.
+          Every suite runs to the end whatever fails before it, as ctest does;
+          the results are uploaded as JUnit and summarised on the run page. The
+          build fails before upload when no staged target declares a suite or a
+          manifest names something that was not staged.
+        type: boolean
+        required: false
+        default: false
+      native-tests:
+        description: Run `tests` on a real windows-latest runner.
+        type: boolean
+        required: false
+        default: true
+      wine-tests:
+        description: >
+          Also run `tests` under wine on ubuntu-latest. Off by default: wine's
+          named pipes and process semantics differ from Windows exactly where
+          IPC tests look, so a red here is a lead, not a verdict.
+        type: boolean
+        required: false
+        default: false
+      tests-timeout-minutes:
+        description: Timeout of each test job. The runner stops starting cases 5 minutes before it.
+        type: number
+        required: false
+        default: 60
       native-smoke:
         description: Run `smoke` on a real windows-latest runner. Free on public repos.
         type: boolean
@@ -668,6 +698,15 @@ jobs:
           fi
           echo "generated $(wc -l < stage/doctest-smoke.sh) lines from $DOCTEST_SPEC"
 
+      # A manifest that names something that was not staged fails here, before
+      # the upload, rather than on the Windows runner.
+      - name: Check the test manifests
+        if: inputs.tests
+        uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
+        with:
+          stage-dir: stage
+          check-only: 'true'
+
       # (doctest-smoke.sh rides along in the artifact and is invisible to the
       # manifest below, which enumerates .exe/.dll only.)
       - name: Record the PE manifest for the round-trip check
@@ -687,12 +726,18 @@ jobs:
           TARGETS_IN: ${{ inputs.targets }}
           WINE_SMOKE: ${{ inputs.wine-smoke }}
           NATIVE_SMOKE: ${{ inputs.native-smoke }}
+          TESTS: ${{ inputs.tests }}
+          WINE_TESTS: ${{ inputs.wine-tests }}
+          NATIVE_TESTS: ${{ inputs.native-tests }}
         run: |
           set -euo pipefail
           {
             echo "### Windows (cross)"
             echo "- targets: \`$TARGETS_IN\`"
             echo "- staged PEs: $(wc -l < stage/pe-manifest.txt)"
+            if [ "$TESTS" = true ]; then
+              echo "- test suites: native=$NATIVE_TESTS wine=$WINE_TESTS"
+            fi
             if [ -z "$SMOKE" ] && [ -z "$SMOKE_FILE" ] && [ -z "$DOCTEST_SPEC" ]; then
               echo "- runtime coverage: **NONE — compile-and-inspect only.**"
               echo "  Nothing in this repo was executed on Windows. Add a \`smoke:\` script."
@@ -816,6 +861,50 @@ jobs:
           name: doctest-execs-${{ github.event.repository.name }}
           path: stage/doctest-execs.json
           if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # THE TEST LEGS: the suites the staged targets declare, run to the end.
+  # Separate jobs, like the smoke legs, so a disabled leg is absent rather than
+  # green. Both call the same action; only `wine` differs.
+  # --------------------------------------------------------------------------
+  native-tests:
+    needs: cross-build
+    if: inputs.tests && inputs.native-tests
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.tests-timeout-minutes }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-${{ github.event.repository.name }}
+          path: stage
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
+        with:
+          stage-dir: stage
+          wine: 'false'
+          budget-minutes: ${{ inputs.tests-timeout-minutes }}
+          results-name: windows-tests-${{ github.event.repository.name }}-native
+
+  wine-tests:
+    needs: cross-build
+    if: inputs.tests && inputs.wine-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.tests-timeout-minutes }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-${{ github.event.repository.name }}
+          path: stage
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          github-token: ${{ github.token }}
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
+        with:
+          stage-dir: stage
+          wine: 'true'
+          budget-minutes: ${{ inputs.tests-timeout-minutes }}
+          results-name: windows-tests-${{ github.event.repository.name }}-wine
 
   # ══════════════════════════════════════════════════════════════════════════
   # The report. Runs on Linux because `assemble` and `report` need nix, which is

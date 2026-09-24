@@ -45,6 +45,11 @@ jobs:
           W=path:.#legacyPackages.x86_64-linux
           nix shell "$W.shellcheck" "$W.yq-go" -c .github/lint-actions.sh
 
+      # The test runner's verdicts, against fake suites: pass, fail, skip,
+      # crash, hang, a non-zero exit after a pass, an empty suite.
+      - name: Self-test the Windows test runner
+        run: python3 .github/actions/windows-tests/run_tests.py --self-test
+
       # actionlint still runs, over the scope it actually covers. It is kept
       # for the workflow-schema checks it is good at -- NOT as evidence about
       # interpolation-into-shell, which it substitutes away before shellcheck

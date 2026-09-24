@@ -77,6 +77,10 @@ jobs:
       #                       imports are not bundled with it)
       # native-smoke: true    run on a real windows-latest runner (free, ~2 min)
       # wine-smoke: true      run under wine first, for a faster red
+      # tests: false          run the suites the targets declare in
+      #                       share/logos-tests/*.json (docs/windows-ci.md)
+      # wine-tests: false     also run them under wine
+      # tests-timeout-minutes: 60
       # cold-derivation-budget: 30
       #                       refuse to start an unprimed mingw Qt build
       # assemble: '{}'        widen the import search path for a multi-
