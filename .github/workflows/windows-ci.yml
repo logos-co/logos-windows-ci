@@ -373,7 +373,7 @@ jobs:
             echo "smoke-file: $SMOKE_FILE ($(wc -l < "$SMOKE_FILE" | tr -d '[:space:]') lines)"
           fi
 
-      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@feat/windows-tests-preview
         with:
           attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
           attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
@@ -632,7 +632,7 @@ jobs:
           echo "staged tree root:"; ls -1 stage
           find stage -type f | wc -l
 
-      - uses: logos-co/logos-windows-ci/.github/actions/windows-gates@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-gates@feat/windows-tests-preview
         with:
           stage-dir: stage
           min-pes: ${{ inputs.min-pes }}
@@ -702,7 +702,7 @@ jobs:
       # the upload, rather than on the Windows runner.
       - name: Check the test manifests
         if: inputs.tests
-        uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
+        uses: logos-co/logos-windows-ci/.github/actions/windows-tests@feat/windows-tests-preview
         with:
           stage-dir: stage
           check-only: 'true'
@@ -800,12 +800,12 @@ jobs:
         with:
           name: windows-x86_64-${{ github.event.repository.name }}
           path: stage
-      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@feat/windows-tests-preview
         with:
           attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
           attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
           github-token: ${{ github.token }}
-      - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@feat/windows-tests-preview
         env:
           # Where the generated script writes its execution records. Relative to
           # the staged tree, which is the smoke script's cwd.
@@ -842,7 +842,7 @@ jobs:
         with:
           name: windows-x86_64-${{ github.event.repository.name }}
           path: stage
-      - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@feat/windows-tests-preview
         env:
           EXECS_OUT: doctest-execs.json
         with:
@@ -877,7 +877,7 @@ jobs:
         with:
           name: windows-x86_64-${{ github.event.repository.name }}
           path: stage
-      - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@feat/windows-tests-preview
         with:
           stage-dir: stage
           wine: 'false'
@@ -894,12 +894,12 @@ jobs:
         with:
           name: windows-x86_64-${{ github.event.repository.name }}
           path: stage
-      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@feat/windows-tests-preview
         with:
           attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
           attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
           github-token: ${{ github.token }}
-      - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@feat/windows-tests-preview
         with:
           stage-dir: stage
           wine: 'true'
@@ -928,7 +928,7 @@ jobs:
         with:
           name: doctest-execs-${{ github.event.repository.name }}
           path: execs
-      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@feat/windows-tests-preview
         with:
           attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
           attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
