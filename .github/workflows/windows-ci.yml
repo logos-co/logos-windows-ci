@@ -94,8 +94,9 @@ on:
           printed nothing, and on any failure reports the exit code, both of
           the program's streams, and what shipped beside the binary.
           `$STAGE_ABS` is the tree root spelled the way the PE will see it (a
-          `Z:` path under wine, a drive path on Windows). Empty means
-          COMPILE-ONLY -- allowed, but reported as a coverage gap, not a pass.
+          `Z:` path under wine, a drive path on Windows). Empty, with no
+          `tests` leg either, means COMPILE-ONLY -- allowed, but reported as a
+          coverage gap, not a pass.
         type: string
         required: false
         default: ''
@@ -731,6 +732,13 @@ jobs:
           NATIVE_TESTS: ${{ inputs.native-tests }}
         run: |
           set -euo pipefail
+          ran_smoke=false
+          if [ -n "$SMOKE" ] || [ -n "$SMOKE_FILE" ] || [ -n "$DOCTEST_SPEC" ]; then ran_smoke=true; fi
+          # A test leg executes this repo's binaries as surely as a smoke does.
+          ran_tests=false
+          if [ "$TESTS" = true ] && { [ "$NATIVE_TESTS" = true ] || [ "$WINE_TESTS" = true ]; }; then
+            ran_tests=true
+          fi
           {
             echo "### Windows (cross)"
             echo "- targets: \`$TARGETS_IN\`"
@@ -738,14 +746,16 @@ jobs:
             if [ "$TESTS" = true ]; then
               echo "- test suites: native=$NATIVE_TESTS wine=$WINE_TESTS"
             fi
-            if [ -z "$SMOKE" ] && [ -z "$SMOKE_FILE" ] && [ -z "$DOCTEST_SPEC" ]; then
-              echo "- runtime coverage: **NONE — compile-and-inspect only.**"
-              echo "  Nothing in this repo was executed on Windows. Add a \`smoke:\` script."
-            else
+            if [ "$ran_smoke" = true ]; then
               echo "- runtime coverage: wine=$WINE_SMOKE native=$NATIVE_SMOKE"
+            elif [ "$ran_tests" = true ]; then
+              echo "- runtime coverage: the test suites above; no smoke script."
+            else
+              echo "- runtime coverage: **NONE — compile-and-inspect only.**"
+              echo "  Nothing in this repo was executed on Windows. Add a \`smoke:\` script or \`tests: true\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ -z "$SMOKE" ] && [ -z "$SMOKE_FILE" ] && [ -z "$DOCTEST_SPEC" ]; then
+          if [ "$ran_smoke" = false ] && [ "$ran_tests" = false ]; then
             echo "::warning::compile-only: no Windows binary from this repo was executed."
           fi
 
