@@ -147,6 +147,82 @@ and lists those attribute names:
 Each staged directory takes its target's attribute name, so the smoke script's
 paths start with `liblogosdelivery-windows-x86_64/`, not `liblogosdelivery/`.
 
+## Tests: the suites a target declares
+
+A smoke script proves the binaries start. `tests: true` runs the repo's test
+suites on windows-latest, to the end whatever fails before them, the way ctest
+runs them on Linux and macOS:
+
+```yaml
+    with:
+      targets: tests
+      tests: true
+      # wine-tests: true          also under wine; a red there is a lead only
+      # tests-timeout-minutes: 60
+```
+
+A target declares its suites in `share/logos-tests/<any>.json`, installed by its
+own Windows build beside the binaries (nixpkgs' mingw hook already links each
+exe's DLLs into `bin/`, which is what the import gate checks):
+
+```json
+{
+  "suites": [
+    {"name": "wire", "exe": "bin/qt_remote_plain_wire_tests.exe", "timeout": 30},
+    {"name": "cabi", "exe": "bin/qt_remote_plain_cabi_tests.exe", "timeout": 8,
+     "skip": [{"pattern": "PlainNetwork.*", "reason": "tracked in #123"}]},
+    {"name": "probe", "exe": "bin/shutdown_probe.exe", "kind": "exe"}
+  ]
+}
+```
+
+| key | meaning | default |
+|---|---|---|
+| `name` | unique within the target; names the JUnit file | required |
+| `exe` | path relative to the target directory | required |
+| `kind` | `gtest`, or `exe` (passes when it exits 0) | `gtest` |
+| `isolation` | `case` runs each gtest case in its own process, as `gtest_discover_tests` + ctest do; `suite` runs the binary once | `case` for gtest |
+| `timeout` | seconds per case (`case`) or per run (`suite`) | 60 / 900 |
+| `filter` | gtest filter applied when listing the cases | every case |
+| `skip`, `wine_skip` | `[{"pattern", "reason"}]`, fnmatch on `Suite.Case`; reported as skipped with the reason. `wine_skip` applies under wine only | none |
+| `wine` | `false` leaves the suite out of the wine leg, and says so | `true` |
+| `args`, `env`, `path`, `cwd` | arguments, environment, PATH entries (WINEPATH under wine), working directory. `{stage}`, `{target}`, `{exe_dir}` and `{tmp}` expand to paths as the program sees them | cwd: the exe's directory |
+| `jobs` | cases run at once, native leg only | 1 |
+
+The runner refuses, rather than passes:
+
+* a run where no staged target declares a suite (checked on the builder, before
+  the upload), a manifest naming a file that was not staged, an unknown key, and
+  a skip without a reason;
+* a gtest suite that lists no cases;
+* a case gtest recorded as passed whose process then exited non-zero (a crash in
+  a destructor, a thread still running at exit). ctest fails those too.
+
+A hung case is killed with its process tree (`taskkill /T`; under wine the
+wineserver is told to kill everything). Crash and missing-DLL dialogs are
+suppressed, so a crash is an exit code rather than a hang. The runner stops
+starting cases five minutes before `tests-timeout-minutes` and reports the rest
+as not run, so the report still gets written.
+
+Results are uploaded as `windows-tests-<repo>-native` (and `-wine`):
+`<target>/<suite>.xml` in JUnit form, `<target>/<suite>/<case>.log` for each
+failure, and `summary.md`, which is also the run page's summary.
+
+A Nix test build writes its manifest with `builtins.toJSON`:
+
+```nix
+installPhase = ''
+  mkdir -p $out/bin $out/share/logos-tests
+  cp protocol/*_tests.exe $out/bin/
+  cp ${pkgs.writeText "tests.json" (builtins.toJSON {
+    suites = [ { name = "wire"; exe = "bin/qt_remote_plain_wire_tests.exe"; } ];
+  })} $out/share/logos-tests/tests.json
+'';
+```
+
+`run_tests.py --self-test` checks every verdict above against fake suites; lint CI
+runs it on each change here.
+
 ## `run`, and what it does and does not claim
 
 Every PE is launched through a `run` wrapper on `PATH` — wine on the Linux leg,
@@ -463,8 +539,8 @@ in a cross-repo reusable workflow, and this harness has never executed on a
 runner at all. Absolute refs are the form that is understood. Revisit `$/` once
 there is a green run to regress against.
 
-The rule: **`v1` is one train.** The workflow and all three actions
-(`nix-setup`, `windows-gates`, `windows-smoke`) are tagged from the same commit
+The rule: **`v1` is one train.** The workflow and all four actions
+(`nix-setup`, `windows-gates`, `windows-smoke`, `windows-tests`) are tagged from the same commit
 and move together. Every `uses:` **inside `windows-ci.yml`** says `@v1` — the
 same string the callers use.
 
@@ -482,10 +558,11 @@ that may not exist yet. It is right as it is. Only a workflow that is `uses:`-ed
 
 Note also that "every `uses:` inside `windows-ci.yml` says `@v1`" is **not**
 true, and it is the sentence someone will grep against when re-tagging: of its
-`uses:` lines, the four that name this repo say `@v1`, and the rest are
+`uses:` lines, the ones that name this repo say `@v1`, and the rest are
 third-party actions at their own tags (`actions/checkout@v4`,
-`actions/upload-artifact@v4`, `actions/download-artifact@v4`). The train is the
-four.
+`actions/upload-artifact@v4`, `actions/download-artifact@v4`,
+`actions/setup-python@v5` inside `windows-tests`). The train is this repo's four
+actions and the workflow.
 
 What breaks if the tag moves:
 
