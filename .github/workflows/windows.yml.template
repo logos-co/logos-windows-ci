@@ -46,8 +46,9 @@ jobs:
       #
       # `$STAGE_ABS` is the tree root as the PE sees it (a Z: path under wine).
       #
-      # Leave EMPTY only if this repo produces no executable -- the run is then
-      # reported as compile-only, which is a coverage gap, not a pass.
+      # Leave EMPTY only if this repo produces no executable, or runs its test
+      # suites with `tests: true` -- with neither, the run is reported as
+      # compile-only, which is a coverage gap, not a pass.
       smoke: |
         run default/bin/YOUR_TOOL.exe --version
 
