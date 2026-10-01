@@ -57,6 +57,31 @@ hand-off as the caller's outputs. `omit` leaves unused files out of the staged
 copy; it does not change the upstream build. The doctest can then run
 `windows-logoscore/bin/logoscore.exe` from the staged tree.
 
+### Several calls in one run
+
+One caller run can call this workflow more than once — a matrix over doc-test
+specs, say. Give each call its own `instance`: it suffixes the concurrency group
+and every artifact name. Without it, the calls share a concurrency group and
+cancel each other, and would upload under the same artifact names.
+
+```yaml
+    strategy:
+      matrix: ${{ fromJSON(needs.plan.outputs.windows-matrix) }}
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
+    with:
+      instance: ${{ matrix.id }}
+      doctest-spec: tests/${{ matrix.spec }}.test.yaml
+      doctest-artifact: report-${{ matrix.id }}
+```
+
+### Another repo's Windows leg
+
+`repository` and `ref` build, and read `smoke-file` / `doctest-spec` from, a
+repo other than the caller, at a pinned commit. A caller that pins versions of
+its own — logos-release-set running logos-tutorial's specs — passes them as
+`--override-input` pairs in `extra-nix-args`. Artifact names still use the
+caller's name.
+
 **Read [`docs/windows-ci.md`](docs/windows-ci.md) before adding a caller.**
 It covers the staged-tree path contract (every smoke path starts with a target
 name — `lgx/bin/lgx.exe`, never `bin/lgx.exe`), what `run` does and does not
@@ -93,8 +118,9 @@ every expression interpolation before handing a script to shellcheck, so it is
 in `lint-ci.yml`; neither subsumes the other.
 
 ```bash
-nix develop -c bash .github/lint-actions.sh              # lint
-nix develop -c bash .github/lint-actions.sh --self-test  # prove each rule fires
+W=path:.#legacyPackages.x86_64-linux
+nix shell "$W.shellcheck" "$W.yq-go" -c .github/lint-actions.sh              # lint
+nix shell "$W.shellcheck" "$W.yq-go" -c .github/lint-actions.sh --self-test  # prove each rule fires
 ```
 
 ## Relationship to logos-nix
