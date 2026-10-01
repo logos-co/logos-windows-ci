@@ -31,7 +31,7 @@ SYSTEM = (
     "iphlpapi dnsapi wtsapi32 setupapi winspool rpcrt4 msvcrt "
     "uxtheme dwmapi d3d9 d3d11 d3d12 dxgi dwrite opengl32 wldap32 "
     "normaliz winhttp wininet ncrypt cfgmgr32 powrprof propsys "
-    "oleacc avrt ucrtbase"
+    "oleacc avrt ucrtbase d2d1 shcore odbc32"
 ).split()
 
 
