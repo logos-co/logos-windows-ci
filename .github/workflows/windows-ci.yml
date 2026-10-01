@@ -273,9 +273,36 @@ on:
         type: string
         required: false
         default: ''
+      instance:
+        description: >
+          Names this call when one caller run makes several -- a matrix over
+          doc-test specs, say. It suffixes the concurrency group and every
+          artifact name. Without it, two calls in one run cancel each other
+          (same group) and would upload artifacts under the same names.
+        type: string
+        required: false
+        default: ''
+      repository:
+        description: >
+          owner/name of the repo to build, and to read `smoke-file` and
+          `doctest-spec` from, instead of the caller. For a caller that runs
+          ANOTHER repo's Windows leg against pins of its own -- logos-release-set
+          running logos-tutorial's, with `extra-nix-args` carrying the pins.
+          Empty means the caller.
+        type: string
+        required: false
+        default: ''
+      ref:
+        description: >
+          Commit, tag or branch of `repository` to check out. Empty means
+          checkout's default: the triggering commit for the caller, the
+          default branch for another repo.
+        type: string
+        required: false
+        default: ''
 
 concurrency:
-  group: windows-${{ github.workflow }}-${{ github.ref }}
+  group: windows-${{ github.workflow }}-${{ github.ref }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -288,6 +315,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           submodules: ${{ inputs.submodules }}
 
       # ------------------------------------------------------------------
@@ -764,7 +793,7 @@ jobs:
       # genuine wine-vs-Windows divergence and not a staging difference.
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64-${{ github.event.repository.name }}
+          name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage/
           if-no-files-found: error
           retention-days: 7
@@ -804,11 +833,13 @@ jobs:
       - uses: actions/checkout@v4
         if: inputs.smoke-file != ''
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           path: caller
           submodules: ${{ inputs.submodules }}
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64-${{ github.event.repository.name }}
+          name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage
       - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
         with:
@@ -846,11 +877,13 @@ jobs:
       - uses: actions/checkout@v4
         if: inputs.smoke-file != ''
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           path: caller
           submodules: ${{ inputs.submodules }}
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64-${{ github.event.repository.name }}
+          name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage
       - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
         env:
@@ -868,7 +901,7 @@ jobs:
         if: ${{ always() && inputs.doctest-spec != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: doctest-execs-${{ github.event.repository.name }}
+          name: doctest-execs-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage/doctest-execs.json
           if-no-files-found: error
 
@@ -885,14 +918,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64-${{ github.event.repository.name }}
+          name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage
       - uses: logos-co/logos-windows-ci/.github/actions/windows-tests@v1
         with:
           stage-dir: stage
           wine: 'false'
           budget-minutes: ${{ inputs.tests-timeout-minutes }}
-          results-name: windows-tests-${{ github.event.repository.name }}-native
+          results-name: windows-tests-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}-native
 
   wine-tests:
     needs: cross-build
@@ -902,7 +935,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64-${{ github.event.repository.name }}
+          name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage
       - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
         with:
@@ -914,7 +947,7 @@ jobs:
           stage-dir: stage
           wine: 'true'
           budget-minutes: ${{ inputs.tests-timeout-minutes }}
-          results-name: windows-tests-${{ github.event.repository.name }}-wine
+          results-name: windows-tests-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}-wine
 
   # ══════════════════════════════════════════════════════════════════════════
   # The report. Runs on Linux because `assemble` and `report` need nix, which is
@@ -932,11 +965,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           path: caller
           submodules: ${{ inputs.submodules }}
       - uses: actions/download-artifact@v4
         with:
-          name: doctest-execs-${{ github.event.repository.name }}
+          name: doctest-execs-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: execs
       - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
         with:
