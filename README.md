@@ -57,6 +57,22 @@ hand-off as the caller's outputs. `omit` leaves unused files out of the staged
 copy; it does not change the upstream build. The doctest can then run
 `windows-logoscore/bin/logoscore.exe` from the staged tree.
 
+### UI tests in a doctest
+
+A `ui_test` step in the spec runs on the Windows runner too. The generated
+script launches the app headless, waits for its inspector, drives it with Node
+(pinned to 22 here), then stops the app's whole process tree. Stage the app and
+the logos-qt-mcp directory the step's `qt_mcp:` names; `extra-targets` can
+bring in the latter:
+
+```yaml
+  extra-targets: >-
+    {"qt-mcp": {"ref": "github:logos-co/logos-qt-mcp#packages.x86_64-linux.default"}}
+```
+
+The screenshots are inlined into the published report. Each step's app log is
+in the `doctest-execs-*` artifact, as `ui-test-logs/<step>.log`.
+
 ### Several calls in one run
 
 One caller run can call this workflow more than once — a matrix over doc-test
