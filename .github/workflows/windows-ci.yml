@@ -145,6 +145,13 @@ on:
           The spec must mark that half -- see logos-doctest's
           doctests/08-cross-platform.test.yaml. An unmarked spec would emit every
           step including the nix ones, which cannot run there.
+
+          A `ui_test` step runs too: the app starts headless, the script waits
+          for its inspector and drives it with Node, which this workflow pins.
+          Everything it launches must be staged, and so must the logos-qt-mcp
+          directory its `qt_mcp:` names (`extra-targets` can stage it). Its
+          screenshots are inlined into the report, and each step's app log
+          rides in the doctest-execs artifact.
         type: string
         required: false
         default: ''
@@ -885,6 +892,11 @@ jobs:
         with:
           name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
           path: stage
+      # A doctest ui_test drives the app with Node: pinned, not whatever the image ships.
+      - uses: actions/setup-node@v4
+        if: inputs.doctest-spec != ''
+        with:
+          node-version: 22
       - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
         env:
           EXECS_OUT: doctest-execs.json
@@ -896,13 +908,17 @@ jobs:
           wine: 'false'
 
       # The records are produced on Windows and rendered on Linux, because
-      # `assemble` needs nix. This is the hand-off.
+      # `assemble` needs nix. This is the hand-off. A ui_test also leaves its
+      # screenshots (images/) and each step's app log (ui-test-logs/).
       - name: Upload the doctest execution records
         if: ${{ always() && inputs.doctest-spec != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: doctest-execs-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
-          path: stage/doctest-execs.json
+          path: |
+            stage/doctest-execs.json
+            stage/images/
+            stage/ui-test-logs/
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
@@ -991,9 +1007,12 @@ jobs:
           # render as a complete-looking tutorial that asserted nothing. Neither
           # refusal is caught here: if the Windows leg produced no records, this
           # job SHOULD fail rather than publish a reassuring empty page.
+          # A leg that ran ui_test steps brought screenshots: inline them.
+          images=()
+          if [ -d execs/images ]; then images=(--images-dir execs/images); fi
           nix run github:logos-co/logos-doctest -- assemble \
             "caller/$DOCTEST_SPEC" execs/doctest-execs.json \
-            -o out/results.json --platform-label "$DOCTEST_PLATFORM-latest"
+            -o out/results.json --platform-label "$DOCTEST_PLATFORM-latest" "${images[@]}"
           nix run github:logos-co/logos-doctest -- report \
             out/results.json -o out/index.html
           echo "report: $(wc -c < out/index.html) bytes"
