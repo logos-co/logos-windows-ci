@@ -155,6 +155,18 @@ on:
         type: string
         required: false
         default: ''
+      doctest-specs:
+        description: >
+          Several doctest specs, whitespace-separated, from ONE cross-build: the
+          targets are built, gated and staged once, then each spec gets its own
+          Windows run and its own report, uploaded as
+          `<doctest-artifact>-<spec>-windows-latest`, where <spec> is the file
+          name without `.test.yaml`. `targets` and `extra-targets` must cover what
+          every spec runs. Mutually exclusive with `smoke`, `smoke-file` and
+          `doctest-spec`.
+        type: string
+        required: false
+        default: ''
       doctest-artifact:
         description: >
           Artifact-name PREFIX for the published report, matching what the
@@ -316,6 +328,8 @@ jobs:
   cross-build:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      doctest-include: ${{ steps.doctests.outputs.include }}
     env:
       FLAKE: ${{ inputs.submodules == 'false' && '.' || '.?submodules=1' }}
       PACKAGE_SET: ${{ inputs.package-set }}
@@ -343,6 +357,7 @@ jobs:
           SMOKE: ${{ inputs.smoke }}
           SMOKE_FILE: ${{ inputs.smoke-file }}
           DOCTEST_SPEC: ${{ inputs.doctest-spec }}
+          DOCTEST_SPECS: ${{ inputs.doctest-specs }}
           DOCTEST_ARTIFACT: ${{ inputs.doctest-artifact }}
           DOCTEST_PLATFORM: ${{ inputs.doctest-platform }}
         run: |
@@ -351,12 +366,40 @@ jobs:
           [ -n "$SMOKE" ] && n=$((n+1))
           [ -n "$SMOKE_FILE" ] && n=$((n+1))
           [ -n "$DOCTEST_SPEC" ] && n=$((n+1))
+          [ -n "${DOCTEST_SPECS//[[:space:]]/}" ] && n=$((n+1))
           if [ "$n" -gt 1 ]; then
-            echo "::error::more than one of 'smoke', 'smoke-file' and 'doctest-spec'"
-            echo "::error::is set. They are three ways to deliver the SAME script, so all"
-            echo "::error::but one would be silently ignored -- and which one survives is"
-            echo "::error::not something a reader of the caller could work out. Pick one."
+            echo "::error::more than one of 'smoke', 'smoke-file', 'doctest-spec' and"
+            echo "::error::'doctest-specs' is set. They are four ways to deliver the SAME"
+            echo "::error::script, so all but one would be silently ignored -- and which one"
+            echo "::error::survives is not something a reader of the caller could work out."
             exit 1
+          fi
+          # doctest-specs: every spec exists, marks its platforms, and has a name
+          # of its own, since that name keys its run and its report.
+          if [ -n "${DOCTEST_SPECS//[[:space:]]/}" ]; then
+            if [ -z "$DOCTEST_ARTIFACT" ]; then
+              echo "::error::doctest-specs is set but doctest-artifact is empty: the reports"
+              echo "::error::would upload under names the caller's publish job never reads."
+              exit 1
+            fi
+            seen=" "
+            for spec in $DOCTEST_SPECS; do
+              id=$(basename "$spec" .test.yaml)
+              if [ ! -f "$spec" ]; then
+                echo "::error::doctest-specs: $spec does not exist in this repo."
+                exit 1
+              fi
+              if ! grep -qE '^[[:space:]]*platform:' "$spec"; then
+                echo "::error::$spec marks no section or step with 'platform:', so every"
+                echo "::error::step, nix builds included, would be emitted for '$DOCTEST_PLATFORM'."
+                exit 1
+              fi
+              case "$seen" in
+                *" $id "*) echo "::error::doctest-specs: two specs are named $id."; exit 1 ;;
+              esac
+              seen="$seen$id "
+              echo "doctest-specs: $spec -> ${DOCTEST_ARTIFACT}-${id}-windows-latest"
+            done
           fi
           if [ -n "$DOCTEST_SPEC" ]; then
             if [ ! -f "$DOCTEST_SPEC" ]; then
@@ -735,6 +778,32 @@ jobs:
           fi
           echo "generated $(wc -l < stage/doctest-smoke.sh) lines from $DOCTEST_SPEC"
 
+      # doctest-specs: one script per spec, all in the one staged tree, and the
+      # list the per-spec jobs below fan out over.
+      - name: Generate the doctest smoke scripts
+        id: doctests
+        if: inputs.doctest-specs != ''
+        env:
+          DOCTEST_SPECS: ${{ inputs.doctest-specs }}
+          DOCTEST_EXT: ${{ inputs.doctest-ext }}
+          DOCTEST_PLATFORM: ${{ inputs.doctest-platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage/doctest
+          include='[]'
+          for spec in $DOCTEST_SPECS; do
+            id=$(basename "$spec" .test.yaml)
+            nix run github:logos-co/logos-doctest -- emit-smoke "$spec" \
+              --platform "$DOCTEST_PLATFORM" --ext "$DOCTEST_EXT" --exe .exe \
+              -o "stage/doctest/$id.sh"
+            if [ ! -s "stage/doctest/$id.sh" ]; then
+              echo "::error::emit-smoke exited 0 but wrote no script for $spec."; exit 1
+            fi
+            echo "generated $(wc -l < "stage/doctest/$id.sh") lines from $spec"
+            include=$(jq -c --arg id "$id" --arg spec "$spec" '. + [{id: $id, spec: $spec}]' <<< "$include")
+          done
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
       # A manifest that names something that was not staged fails here, before
       # the upload, rather than on the Windows runner.
       - name: Check the test manifests
@@ -760,6 +829,7 @@ jobs:
           SMOKE: ${{ inputs.smoke }}
           SMOKE_FILE: ${{ inputs.smoke-file }}
           DOCTEST_SPEC: ${{ inputs.doctest-spec }}
+          DOCTEST_SPECS: ${{ inputs.doctest-specs }}
           TARGETS_IN: ${{ inputs.targets }}
           WINE_SMOKE: ${{ inputs.wine-smoke }}
           NATIVE_SMOKE: ${{ inputs.native-smoke }}
@@ -769,7 +839,7 @@ jobs:
         run: |
           set -euo pipefail
           ran_smoke=false
-          if [ -n "$SMOKE" ] || [ -n "$SMOKE_FILE" ] || [ -n "$DOCTEST_SPEC" ]; then ran_smoke=true; fi
+          if [ -n "$SMOKE" ] || [ -n "$SMOKE_FILE" ] || [ -n "$DOCTEST_SPEC" ] || [ -n "${DOCTEST_SPECS//[[:space:]]/}" ]; then ran_smoke=true; fi
           # A test leg executes this repo's binaries as surely as a smoke does.
           ran_tests=false
           if [ "$TESTS" = true ] && { [ "$NATIVE_TESTS" = true ] || [ "$WINE_TESTS" = true ]; }; then
@@ -1025,5 +1095,99 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.doctest-artifact }}-windows-latest
+          path: out/
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # doctest-specs: every spec runs against the ONE tree cross-build staged, on
+  # its own windows-latest runner, and gets its own report. Separate from the
+  # single-spec jobs above so a doctest-spec caller keeps those exact names.
+  # --------------------------------------------------------------------------
+  doctests:
+    name: doctests (${{ matrix.id }})
+    needs: cross-build
+    if: inputs.doctest-specs != '' && inputs.native-smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.cross-build.outputs.doctest-include) }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}
+          path: stage
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: logos-co/logos-windows-ci/.github/actions/windows-smoke@v1
+        env:
+          EXECS_OUT: doctest-execs.json
+        with:
+          stage-dir: stage
+          smoke-file: doctest/${{ matrix.id }}.sh
+          caller-dir: stage
+          wine: 'false'
+
+      - name: Upload the doctest execution records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctest-execs-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}-${{ matrix.id }}
+          path: |
+            stage/doctest-execs.json
+            stage/images/
+            stage/ui-test-logs/
+          if-no-files-found: error
+
+  doctest-reports:
+    name: doctest report (${{ matrix.id }})
+    needs: [cross-build, doctests]
+    # A failing run is when the report is worth reading; only a cross-build
+    # that never produced the list leaves nothing to report on.
+    if: ${{ always() && inputs.doctest-specs != '' && needs.cross-build.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.cross-build.outputs.doctest-include) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          path: caller
+          submodules: ${{ inputs.submodules }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: doctest-execs-${{ github.event.repository.name }}${{ inputs.instance != '' && format('-{0}', inputs.instance) || '' }}-${{ matrix.id }}
+          path: execs
+      - uses: logos-co/logos-windows-ci/.github/actions/nix-setup@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          github-token: ${{ github.token }}
+
+      - name: Assemble and render
+        env:
+          DOCTEST_SPEC: ${{ matrix.spec }}
+          DOCTEST_PLATFORM: ${{ inputs.doctest-platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          images=()
+          if [ -d execs/images ]; then images=(--images-dir execs/images); fi
+          nix run github:logos-co/logos-doctest -- assemble \
+            "caller/$DOCTEST_SPEC" execs/doctest-execs.json \
+            -o out/results.json --platform-label "$DOCTEST_PLATFORM-latest" "${images[@]}"
+          nix run github:logos-co/logos-doctest -- report \
+            out/results.json -o out/index.html
+          echo "report: $(wc -c < out/index.html) bytes"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.doctest-artifact }}-${{ matrix.id }}-windows-latest
           path: out/
           if-no-files-found: error
