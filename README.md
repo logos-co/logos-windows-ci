@@ -73,6 +73,23 @@ bring in the latter:
 The screenshots are inlined into the published report. Each step's app log is
 in the `doctest-execs-*` artifact, as `ui-test-logs/<step>.log`.
 
+### Several doctest specs from one build
+
+`doctest-specs` takes a whitespace-separated list instead of one spec. The
+targets are cross-built, gated and staged ONCE; each spec then runs on its own
+windows-latest runner against that tree and gets its own report, uploaded as
+`<doctest-artifact>-<spec>-windows-latest` (`<spec>` is the file name without
+`.test.yaml`). `targets` and `extra-targets` must cover what every spec runs.
+
+```yaml
+with:
+  targets: bin-bundle-dir-inspector logos-qt-mcp
+  doctest-specs: >-
+    doctests/app-shell.test.yaml
+    doctests/app-settings.test.yaml
+  doctest-artifact: app-doctest-report
+```
+
 ### Several calls in one run
 
 One caller run can call this workflow more than once — a matrix over doc-test
