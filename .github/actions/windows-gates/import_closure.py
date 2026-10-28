@@ -35,7 +35,9 @@ SYSTEM = (
     # USB HID, which hidapi's native backend links for hardware wallets.
     "hid "
     # Smart cards, which the pcsc crate links for a Keycard in a reader.
-    "winscard"
+    "winscard "
+    # Performance counters, which sysinfo links; Arti, the Rust Tor, uses it for its memory quota.
+    "pdh"
 ).split()
 
 
