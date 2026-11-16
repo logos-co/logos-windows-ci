@@ -84,13 +84,8 @@ runs:
                     /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
         df -h /
 
-    # @v1, not @master. That repo runs the same one-train convention this one
-    # does -- v1 == v1.2.0 == 781f072 at time of writing -- and a branch ref
-    # here would make the Nix version and the cache endpoints float, which is
-    # the same "unpinned reader, unpinned verdict" argument the gates and the
-    # wine launcher are pinned for one layer down.
     - name: Install Nix with the Logos cache
-      uses: logos-co/setup-nix-cache-action@v1
+      uses: logos-co/setup-nix-cache-action@v1.2.2
       with:
         attic-token-ci: ${{ inputs.attic-token-ci }}
         attic-token-public: ${{ inputs.attic-token-public }}
