@@ -85,7 +85,7 @@ runs:
         df -h /
 
     - name: Install Nix with the Logos cache
-      uses: logos-co/setup-nix-cache-action@v1.2.2
+      uses: logos-co/setup-nix-cache-action@c3ebf5b2c9efbae4324a6497db5d0aa2b5163d3b # v1, new public + ci keys
       with:
         attic-token-ci: ${{ inputs.attic-token-ci }}
         attic-token-public: ${{ inputs.attic-token-public }}
